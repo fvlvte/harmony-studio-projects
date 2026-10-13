@@ -500,8 +500,20 @@ def artifact_inventory(output, records):
     return sorted(result, key=lambda item: item["path"])
 
 
+def evidence_modules():
+    path = Path(__file__).with_name("seal_sdk_evidence.py")
+    spec = importlib.util.spec_from_file_location("sdk_evidence", path)
+    sealing = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sealing)
+    pins = sealing.snapshot()
+    selection = sealing.module("evidence_selection", pins)
+    return sealing, selection, pins
+
+
 def compile(case, row, operation, verify):
     context = prepared(case, row, operation, verify)
+    sealing, selection, evidence_pins = evidence_modules()
+    sealing.recipient()  # Protected tuple admitted before any SDK compiler work.
     evidence = case / "build-private"; evidence.mkdir(mode=0o700, exist_ok=False)
     owner = verify.Owner(evidence, started=context["started_monotonic"])
     source, registry, output = case / "frozen-sdk", case / "public-registry", case / "compiler-output"
@@ -543,10 +555,12 @@ def compile(case, row, operation, verify):
         # The runtime copy is writable public cache, never the host's CARGO_HOME.
         mount_index = next(i + 1 for i, item in enumerate(args) if item == "--mount" and "dst=/registry" in args[i + 1])
         args[mount_index] = args[mount_index].removesuffix(",readonly")
+        compile_remaining = owner.remaining(3600) - 120  # Reserve metadata60 + seal60 inside original3900.
+        require(compile_remaining > 0, "evidence_reserve_exhausted")
         raw = start(owner, compiler, args, ["cargo", "+" + RUST, "build", "--offline", "--frozen",
             "--manifest-path", "examples/game/Cargo.toml", "--target", TARGET, "--profile", "web-release",
             "--bin", "harmony-games", "--features", "web-webgl2", "--jobs", "1", "--message-format=json"],
-            min(3600, owner.remaining(3600)))
+            min(3600, compile_remaining))
         events = cargo_events(raw)
         # Metadata is read only, offline, in the same source/toolchain boundary.
         meta, args = container(owner, row, operation, "metadata", source, runtime_registry, output)
@@ -562,6 +576,12 @@ def compile(case, row, operation, verify):
     finally:
         clean = owner.close()
     require(clean and primary == "built_not_qualified", "compiler_failed_or_unknown")
+    require(verify.STOP is None and time.monotonic() < owner.hard, "producer_deadline")
+    require(sealing.snapshot() == evidence_pins, "evidence_source_changed")
+    closure = selection.owner_closure_projection(owner, operation, evidence_pins)
+    closure.update(original_exit_code=0, stop_signal=verify.STOP, source_unchanged=True,
+                   started_monotonic=context["started_monotonic"], hard_monotonic=owner.hard)
+    verify.save(case / "producer-closure.private.json", closure)
     require(verify.STOP is None and time.monotonic() < owner.hard, "producer_deadline")
     files = artifact_inventory(output, candidate)
     require(verify.STOP is None and time.monotonic() < owner.hard, "producer_deadline")

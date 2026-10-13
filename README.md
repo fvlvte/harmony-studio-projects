@@ -9,14 +9,16 @@ closure from encrypted engine inputs.
 
 ## Current status
 
-The reviewed initial commit is published on `main` as
-`d642105c37620107915cadc76442c368d1c0d1ef`. Keyless public checks passed on the
-Linux ARM runner: 59 tests passed with no skips. The public toolchain image also
-built successfully; that build alone does not qualify the SDK or its runtime.
-No SDK release or GitHub secret has been created. Both verification catalogs and the
-trusted producer's source/export catalogs are deliberately empty. A manual
-verification/build request refuses before network, decryption or Docker work
-unless its tuple has been reviewed and entered in the applicable catalog.
+The reviewed initial source commit remains
+`d642105c37620107915cadc76442c368d1c0d1ef`. The current keyless Linux ARM checks
+at commit `42f9` passed all 71 tests with no skips. The public toolchain build and
+isolated identity probe also passed; neither qualifies the SDK or its runtime.
+Ten focused encrypted-evidence selection controls passed separately in the local
+Root-owned runner. Actual SDK production and cipher delivery have not run.
+No SDK release or GitHub secret has been created. Verification, trusted source,
+export and public-recipient catalogs start empty. A manual request refuses before
+network, decryption or Docker work unless its exact tuple is independently reviewed
+and entered in the applicable catalog.
 
 The initial harness includes 24 bundle-guard tests, 7 exporter tests, 19 consumer
 tests and 9 producer tests. The toolchain probe adds 12 controls, including one
@@ -120,7 +122,22 @@ container. The probe keeps one 120-second budget through cleanup and receipt
 persistence. Its only uploaded artifact is the fixed public receipt after an
 actual successful probe exit; raw evidence stays in the ephemeral runner.
 Image-build provenance, SDK qualification and ABI qualification remain separate
-requirements. A passing probe does not establish those requirements.
+requirements. A passing probe does not establish those requirements. The proposed
+manual publication step targets this repository's own GHCR package with an explicit
+source label. Publication still requires a fresh image/probe join, immutable
+manifest and config identities, and actual anonymous public access. Those checks
+have not run for the publication candidate; the earlier local image ID is not a
+fetchable registry reference.
+
+The proposed producer return encrypts only the exact Cargo-bound compiled file
+inventory and fixed private metadata projections to an approved public age
+recipient. A separate success-only upload contains exactly `evidence.tar.age` and
+`cipher-receipt.json`. The private identity stays local; CI installs only the
+pinned public age binary and receives no decryption identity. Source, the 460-file
+encrypted SDK input, source key, raw Cargo logs and provider/agent state are absent
+from that return. Host `.rmeta` bytes may return for private inspection with an
+explicit unqualified format status; public bundle format checks stay strict.
+Cipher delivery grants no public SDK, ABI, full-feature or confidentiality approval.
 
 `opaque_sdk.py` is an explicit exporter, not a compiler or an approval service.
 It requires five independently pinned documents: policy, producer receipt,

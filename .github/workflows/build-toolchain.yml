@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Static public-context checks or a local unqualified image build
+        description: Public context checks, local unqualified build, or reviewed GHCR publication
         type: choice
-        options: [checks, build]
+        options: [checks, build, publish]
         default: checks
 
 permissions:
@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   toolchain:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'fvlvte/harmony-studio-projects' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'fvlvte/harmony-studio-projects' && github.ref == 'refs/heads/main' && inputs.mode != 'publish' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     env:
@@ -103,3 +103,101 @@ jobs:
       # upload. APT tool bytes are observed inventory, not source qualification.
       # Actual image identity, toolchain provenance, lifecycle and later public
       # publication require separate owner qualification and authorization.
+
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'fvlvte/harmony-studio-projects' && github.ref == 'refs/heads/main' && inputs.mode == 'publish' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TOOLCHAIN_MODE: publish
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Refuse unsupported dispatch mode before any build
+        run: |
+          case "$TOOLCHAIN_MODE" in publish) ;; *) exit 78 ;; esac
+      - name: Check the exact public context and immutable ARM64 base
+        run: |
+          python3 -I -B - <<'PY'
+          import pathlib, re, stat
+          root = pathlib.Path('toolchain')
+          expected = {'Dockerfile', '.dockerignore', 'README.md'}
+          assert root.is_dir() and not root.is_symlink()
+          assert {p.name for p in root.iterdir()} == expected
+          for name in expected:
+              p = root / name
+              assert stat.S_ISREG(p.lstat().st_mode) and not p.is_symlink()
+              assert p.stat().st_size <= 65536
+          text = (root / 'Dockerfile').read_text()
+          instructions = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+          assert instructions[0] == 'FROM --platform=linux/arm64 rust:1.98.1-slim-bookworm@sha256:3ebe98baef5911f8461cf81ba05644374a3c5ef1f8a33db3977bd4175f5ff1fc'
+          assert not any(re.match(r'(?i)^(COPY|ADD)\b', line) for line in instructions)
+          assert 'ENTRYPOINT ["/usr/bin/env"]' in instructions
+          assert 'USER 65532:65532' in instructions
+          assert (root / '.dockerignore').read_text().splitlines()[1:] == ['*', '!Dockerfile', '!.dockerignore']
+          print('PUBLIC_TOOLCHAIN_CONTEXT_CHECKED_NOT_QUALIFIED')
+          PY
+      - name: Build a local runner image using only the public context
+        if: ${{ success() }}
+        run: |
+          set -euo pipefail
+          umask 077
+          case_dir=$(mktemp -d "$RUNNER_TEMP/public-toolchain.XXXXXXXX")
+          mkdir -m 700 "$case_dir/docker"
+          printf '{}\n' > "$case_dir/docker/config.json"
+          chmod 600 "$case_dir/docker/config.json"
+          timeout --signal=TERM --kill-after=30s 900s \
+            env -i PATH=/usr/bin:/bin LANG=C.UTF-8 DOCKER_CONFIG="$case_dir/docker" \
+            docker build --platform linux/arm64 --network default \
+              --file toolchain/Dockerfile --tag harmony-public-toolchain:unqualified \
+              toolchain > "$case_dir/build.private.log" 2>&1
+          printf 'LOCAL_PUBLIC_TOOLCHAIN_IMAGE_BUILT_NOT_QUALIFIED\n'
+      - name: Prepare public git-crypt tool inventory without keys
+        if: ${{ success() }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if ! command -v git-crypt >/dev/null 2>&1; then
+            inventory_dir=$(mktemp -d "$RUNNER_TEMP/public-gitcrypt-inventory.XXXXXXXX")
+            timeout --signal=TERM --kill-after=15s 120s \
+              env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /bin/bash -c \
+                'sudo apt-get update && sudo apt-get install -y --no-install-recommends git-crypt' \
+              > "$inventory_dir/install.private.log" 2>&1
+          fi
+          printf 'PUBLIC_PREPARATION_TOOLS_AVAILABLE_NOT_QUALIFIED\n'
+      - name: Probe actual public toolchain identity and owned container closure
+        id: probe
+        if: ${{ success() }}
+        run: >-
+          python3 -I -B -W error tools/probe_toolchain.py
+          --image harmony-public-toolchain:unqualified
+          --context toolchain
+          --output .toolchain-public/receipt.json
+      - name: Publish the freshly probed public image with a scoped GitHub token
+        id: publication
+        if: ${{ success() && steps.probe.outcome == 'success' }}
+        env:
+          GHCR_PUBLISH_TOKEN: ${{ github.token }}
+          GHCR_PUBLISH_ACTOR: ${{ github.actor }}
+        run: python3 -I -B -W error tools/publish_toolchain.py
+      - name: Public immutable registry identity receipt only
+        if: ${{ success() && steps.publication.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: public-toolchain-publication-${{ github.run_id }}
+          path: |
+            .toolchain-public/registry.json
+            .toolchain-public/receipt.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      # Token is scoped to the publication process and its private Docker config.
+      # No source SDK/key/decryption/provider login or raw diagnostics upload.
+      # GitHub manages the build daemon; probe/publication CLI closure is separate.

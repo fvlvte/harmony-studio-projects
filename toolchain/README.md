@@ -7,3 +7,11 @@ The manual `build-toolchain` workflow defaults to static context checks. Its `bu
 The trusted SDK producer overrides this image's `/usr/bin/env` entrypoint with a clean environment, uses separate source, registry and output mounts, and enforces its own container limits. Its source catalog remains empty. Before adding an image to that catalog, the owner must capture the actual full `rustc -vV`, executable and host/Wasm sysroot hashes, package inventory, immutable public registry reference and inspected image ID/environment, then qualify the producer's network-free compile and cleanup boundary. Registry publication needs separate explicit owner approval and must use a source-reviewed public image such as this pilot; the local compiler image containing private Harmony scripts is excluded.
 
 This is a toolchain image, not an `opaque-compile/v1` consumer. It supplies neither an opaque Rust facade nor a compiled dependency graph, rustc shim, consumer entrypoint or SDK approval. The consumer SDK catalog stays empty until those contracts and actual ABI/consumer execution are qualified. Compiled Rust metadata, generics, constants and bitcode can disclose implementation information; an rlib does not establish source confidentiality.
+
+The GHCR publication candidate sets the OCI source label to this repository and
+retains the exact official Rust base name, digest, and upstream source attribution.
+Only an actual fresh build, identity probe, manifest/config digest join, anonymous
+registry read, and immutable pull can produce a publication receipt. The first
+GHCR package is private by default; repository visibility does not establish
+package visibility. Publication does not qualify an SDK, ABI, or full build-daemon
+closure. The operator must verify public visibility separately.

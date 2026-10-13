@@ -14,6 +14,9 @@ on:
       source_sha256:
         description: Exact approved encrypted archive SHA256
         type: string
+      evidence_recipient:
+        description: Protected approved public evidence recipient identifier (initially none)
+        type: string
       operation_id:
         description: Fresh canonical UUID for this trusted producer attempt
         type: string
@@ -35,6 +38,7 @@ jobs:
       SDK_SOURCE: ${{ inputs.source_catalog }}
       SDK_SOURCE_SHA256: ${{ inputs.source_sha256 }}
       SDK_OPERATION: ${{ inputs.operation_id }}
+      SDK_EVIDENCE_RECIPIENT: ${{ inputs.evidence_recipient }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -52,6 +56,19 @@ jobs:
       - name: Admit exact protected source tuple before installing or exposing key
         if: ${{ inputs.mode == 'build' }}
         run: python3 -I -B -W error tools/ci_build_sdk.py --phase admit
+      - name: Admit protected evidence recipient and official age byte pins
+        if: ${{ inputs.mode == 'build' }}
+        run: python3 -I -B -W error tools/seal_sdk_evidence.py --phase admit
+      - name: Install and observe the public pinned age binary without private identities
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          umask 077
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_REF="$GITHUB_REF" \
+            SDK_SOURCE="$SDK_SOURCE" SDK_SOURCE_SHA256="$SDK_SOURCE_SHA256" SDK_OPERATION="$SDK_OPERATION" \
+            SDK_EVIDENCE_RECIPIENT="$SDK_EVIDENCE_RECIPIENT" \
+            python3 -I -B -W error tools/seal_sdk_evidence.py --phase install \
+              --tool-root "$RUNNER_TEMP/harmony-public-age-$SDK_OPERATION"
       - name: Install preparation tool (binary hash must match approved catalog)
         if: ${{ inputs.mode == 'build' }}
         run: |
@@ -66,6 +83,7 @@ jobs:
           umask 077
           python3 -I -B -W error tools/ci_build_sdk.py --phase prepare --case "$RUNNER_TEMP/harmony-trusted-sdk-$SDK_OPERATION"
       - name: Credential-free dependency prefetch then network-none SDK starter compile
+        id: compiler
         if: ${{ inputs.mode == 'build' }}
         run: |
           umask 077
@@ -73,7 +91,32 @@ jobs:
             GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
             GITHUB_REF="$GITHUB_REF" \
             SDK_SOURCE="$SDK_SOURCE" SDK_SOURCE_SHA256="$SDK_SOURCE_SHA256" SDK_OPERATION="$SDK_OPERATION" \
+            SDK_EVIDENCE_RECIPIENT="$SDK_EVIDENCE_RECIPIENT" \
             python3 -I -B -W error tools/ci_build_sdk.py --phase compile --case "$RUNNER_TEMP/harmony-trusted-sdk-$SDK_OPERATION"
-      # No source/key/Cargo logs/private receipt/compiled candidate upload.
-      # A separately approved export catalog and actual ABI/consumer boundary
-      # are required before any future guarded SDK upload step is enabled.
+      - name: Encrypt only the closed compiled evidence for the approved public recipient
+        id: seal
+        if: ${{ success() && inputs.mode == 'build' && steps.compiler.outcome == 'success' }}
+        run: |
+          umask 077
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_REF="$GITHUB_REF" \
+            SDK_SOURCE="$SDK_SOURCE" SDK_SOURCE_SHA256="$SDK_SOURCE_SHA256" SDK_OPERATION="$SDK_OPERATION" \
+            SDK_EVIDENCE_RECIPIENT="$SDK_EVIDENCE_RECIPIENT" \
+            python3 -I -B -W error tools/seal_sdk_evidence.py --phase seal \
+              --case "$RUNNER_TEMP/harmony-trusted-sdk-$SDK_OPERATION" \
+              --tool-root "$RUNNER_TEMP/harmony-public-age-$SDK_OPERATION"
+      - name: Ciphertext and fixed delivery receipt only
+        if: ${{ success() && inputs.mode == 'build' && steps.seal.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: encrypted-sdk-evidence-${{ github.run_id }}
+          path: |
+            .sdk-cipher-evidence/evidence.tar.age
+            .sdk-cipher-evidence/cipher-receipt.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      # No private identity, source key, source/SDK ZIP, raw logs/diagnostics or
+      # plaintext receipt/output tree upload. Cipher delivery never approves
+      # an SDK, source confidentiality, facade/ABI or all-feature compatibility.

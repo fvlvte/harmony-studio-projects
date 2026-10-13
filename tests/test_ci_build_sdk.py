@@ -73,7 +73,7 @@ class ProducerTest(unittest.TestCase):
 
     def test_reviewed_public_toolchain_dockerfile_does_not_admit_private_state(self):
         data = (ROOT / "toolchain/Dockerfile").read_bytes()
-        expected = "ce15ce30234069509dc7c0e3ca6dc465a635cfa582f6b7fcdea18aefaa2f8c6f"
+        expected = "7d2dd2c7a6565aa81d03c7db45cad52ac27c81d6dfd1cecd616cb842e5302c20"
         self.assertEqual(hashlib.sha256(data).hexdigest(), expected)
         item = {"path": "toolchain/Dockerfile", "bytes": len(data), "sha256": expected}
         row = {**self.row, "public_plaintext": [item]}

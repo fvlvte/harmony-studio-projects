@@ -20,17 +20,12 @@ import uuid
 
 IMAGE = "harmony-public-toolchain:unqualified"
 OWNER_SHA = "2dba26e4c5cf05f75a96973350d61959f64f6645322e6ce8a413b5ed13e328eb"
-CONTEXT = [
-    {"path": ".dockerignore", "bytes": 109, "sha256": "5458823ca8d5515f72bc59af26980774f2967bb0e166e5baa27d015e1d241c90"},
-    {"path": "Dockerfile", "bytes": 1143, "sha256": "ce15ce30234069509dc7c0e3ca6dc465a635cfa582f6b7fcdea18aefaa2f8c6f"},
-    {"path": "README.md", "bytes": 2637, "sha256": "fe55bcd57e97ca1cfa3cc27912d1ecb051abf9c6cee6054c11ec603e0f5f5cf0"}]
-CONTEXT_SHA = "3b1cdba016a5c73280fabb8e2658c6d57e631d0aae6ca96f80d8036a005988ec"
+CONTEXT = [{'path': '.dockerignore', 'bytes': 109, 'sha256': '5458823ca8d5515f72bc59af26980774f2967bb0e166e5baa27d015e1d241c90'}, {'path': 'Dockerfile', 'bytes': 1525, 'sha256': '7d2dd2c7a6565aa81d03c7db45cad52ac27c81d6dfd1cecd616cb842e5302c20'}, {'path': 'README.md', 'bytes': 3188, 'sha256': '94637eea115d8c8756b63ca11ea4ecf4ce5fa743323c1eed42f82c6678d37842'}]
+CONTEXT_SHA = '81eeed9ce37a094030fc2b5d1921c2c8bee191df7486a4c3bde00e4aec0d3734'
 ENV = {"PATH": "/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin", "RUSTUP_HOME": "/usr/local/rustup",
        "CARGO_HOME": "/usr/local/cargo", "RUST_VERSION": "1.98.1", "RUSTUP_AUTO_INSTALL": "0",
        "HOME": "/tmp/home", "LANG": "C.UTF-8"}
-LABELS = {"org.opencontainers.image.source": "https://github.com/rust-lang/docker-rust",
-          "online.harmony.role": "public-sdk-toolchain", "online.harmony.contract": "public-toolchain-pilot/v1",
-          "online.harmony.qualification": "unqualified"}
+LABELS = {'org.opencontainers.image.source': 'https://github.com/fvlvte/harmony-studio-projects', 'online.harmony.upstream.source': 'https://github.com/rust-lang/docker-rust', 'org.opencontainers.image.base.name': 'docker.io/library/rust:1.98.1-slim-bookworm', 'org.opencontainers.image.base.digest': 'sha256:3ebe98baef5911f8461cf81ba05644374a3c5ef1f8a33db3977bd4175f5ff1fc', 'online.harmony.role': 'public-sdk-toolchain', 'online.harmony.contract': 'public-toolchain-pilot/v1', 'online.harmony.qualification': 'unqualified'}
 GUEST_ENV = {**ENV, "CARGO_HOME": "/tmp/cargo"}
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 STOP = None

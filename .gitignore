@@ -17,3 +17,5 @@ secrets/
 git-crypt-key
 git-crypt.key
 
+.sdk-cipher-evidence/
+.toolchain-publication-private/
