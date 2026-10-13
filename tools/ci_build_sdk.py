@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import importlib.util
 import json
@@ -172,7 +173,9 @@ PUBLIC_REFUSAL_CODES = frozenset({
     'source_catalog_schema', 'source_catalog_tuple', 'source_catalog_unapproved',
     'source_changed_during_compile', 'source_contract_hash', 'source_directory_refused',
     'source_empty', 'source_inventory_drift', 'source_root',
-    'source_still_encrypted', 'toolchain_drift', 'toolchain_image_identity',
+    'source_still_encrypted', 'toolchain_drift', 'toolchain_image_identity',    'registry_permission_denied', 'registry_no_space', 'registry_read_only', 'registry_io_failure',
+    'registry_quota_exceeded', 'registry_entry_missing', 'registry_os_error', 'registry_copy_failed',
+    'registry_entry_type', 'registry_prefetch_command', 'registry_prefetch_deadline',
 })
 FAILURE_STAGES = frozenset({
     "admission", "prepare", "compile_context", "compile_setup",
@@ -517,7 +520,118 @@ def container(owner, row, operation, phase, source, registry, output):
     return owned, args
 
 
+def prefetch_command():
+    # Cargo's explicit targets retain the Wasm and host dependency closure.
+    return ["cargo", "+" + RUST, "fetch", "--locked", "--manifest-path", "examples/game/Cargo.toml",
+            "--target", TARGET, "--target", HOST]
+
+
+REGISTRY_PREFETCH_GUEST = r'''
+import errno,json,os,pathlib,stat,subprocess,sys,time
+EXPECTED=['cargo','+1.98.1','fetch','--locked','--manifest-path','examples/game/Cargo.toml',
+          '--target','wasm32-unknown-unknown','--target','aarch64-unknown-linux-gnu']
+FORBIDDEN={'credentials','credentials.toml','auth.json','.docker','.codex','.cursor','.claude'}
+CODES={'registry_alias_refused','registry_credentials_refused','registry_entry_type',
+       'registry_entry_changed','registry_prefetch_command','registry_prefetch_deadline',
+       'registry_permission_denied','registry_no_space','registry_read_only','registry_io_failure',
+       'registry_quota_exceeded','registry_entry_missing','registry_os_error','registry_guest_failed'}
+def code(error):
+    if isinstance(error,OSError):
+        return {errno.EACCES:'registry_permission_denied',errno.EPERM:'registry_permission_denied',
+                errno.ENOSPC:'registry_no_space',errno.EROFS:'registry_read_only',errno.EIO:'registry_io_failure',
+                errno.EDQUOT:'registry_quota_exceeded',errno.ENOENT:'registry_entry_missing',
+                errno.ELOOP:'registry_alias_refused'}.get(error.errno,'registry_os_error')
+    if isinstance(error,ValueError) and len(error.args)==1 and type(error.args[0]) is str and error.args[0] in CODES:
+        return error.args[0]
+    return 'registry_guest_failed'
+def need(value,refusal):
+    if not value:raise ValueError(refusal)
+def normalize_registry(root,deadline):
+    counts={'directories':0,'files':0}
+    def remaining():need(time.monotonic()<deadline,'registry_prefetch_deadline')
+    def visit(parent,depth):
+        remaining()
+        with os.scandir(parent) as stream:entries=sorted(item.name for item in stream)
+        for name in entries:
+            remaining()
+            if depth==0:need(name not in FORBIDDEN,'registry_credentials_refused')
+            before=os.stat(name,dir_fd=parent,follow_symlinks=False)
+            need(not stat.S_ISLNK(before.st_mode),'registry_alias_refused')
+            directory=stat.S_ISDIR(before.st_mode)
+            need(directory or stat.S_ISREG(before.st_mode) and before.st_nlink==1,'registry_entry_type')
+            flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|(os.O_DIRECTORY if directory else 0)
+            child=os.open(name,flags,dir_fd=parent)
+            try:
+                held=os.fstat(child)
+                need((held.st_dev,held.st_ino,stat.S_IFMT(held.st_mode))==
+                     (before.st_dev,before.st_ino,stat.S_IFMT(before.st_mode)),'registry_entry_changed')
+                os.fchmod(child,0o755 if directory else 0o644)
+                counts['directories' if directory else 'files']+=1
+                if directory:visit(child,depth+1)
+                visible=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                need((visible.st_dev,visible.st_ino,stat.S_IFMT(visible.st_mode))==
+                     (held.st_dev,held.st_ino,stat.S_IFMT(held.st_mode)),'registry_entry_changed')
+            finally:os.close(child)
+    # The root is created by the host runner with mode0777. Do not chmod it:
+    # guest UID65532 owns its Cargo children, not the host-owned mount root.
+    fd=os.open(root,os.O_RDONLY|os.O_NOFOLLOW|os.O_DIRECTORY|os.O_NONBLOCK)
+    try:visit(fd,0)
+    finally:os.close(fd)
+    remaining()
+    return counts
+def run_prefetch(command,root,maximum):
+    need(command==EXPECTED,'registry_prefetch_command')
+    need(type(maximum) in (int,float) and 0<maximum<=300,'registry_prefetch_deadline')
+    deadline=time.monotonic()+maximum
+    result=subprocess.run(command,check=False,timeout=maximum)
+    if result.returncode!=0:raise SystemExit(result.returncode if result.returncode>0 else 128-result.returncode)
+    return normalize_registry(root,deadline)
+def main():
+    try:
+        counts=run_prefetch(json.loads(sys.argv[1]),pathlib.Path('/registry'),float(sys.argv[2]))
+        print(json.dumps({'schema_version':1,'state':'public_registry_normalized',**counts},sort_keys=True),flush=True)
+        return 0
+    except subprocess.TimeoutExpired:
+        print('registry_prefetch_deadline',file=sys.stderr);return 78
+    except Exception as error:
+        print(code(error),file=sys.stderr);return 78
+if __name__=='__main__':raise SystemExit(main())
+'''
+
+
+def registry_os_error(error):
+    # Never inspect OSError paths or shutil.Error's path/message tuples.
+    return {errno.EACCES: "registry_permission_denied", errno.EPERM: "registry_permission_denied",
+            errno.ENOSPC: "registry_no_space", errno.EROFS: "registry_read_only",
+            errno.EIO: "registry_io_failure", errno.EDQUOT: "registry_quota_exceeded",
+            errno.ENOENT: "registry_entry_missing", errno.ELOOP: "registry_alias_refused"}.get(
+                error.errno, "registry_os_error")
+
+
+def copy_registry(registry, runtime_registry):
+    try:
+        require(registry.is_dir() and not registry.is_symlink(), "registry_alias_refused")
+        for path in registry.rglob("*"):
+            kind = path.lstat().st_mode
+            require(not stat.S_ISLNK(kind), "registry_alias_refused")
+            require(stat.S_ISDIR(kind) or stat.S_ISREG(kind), "registry_entry_type")
+        # Copy the public seed only. The original normalized tree stays intact.
+        shutil.copytree(registry, runtime_registry, symlinks=False)
+        runtime_registry.chmod(0o777)
+        for path in runtime_registry.rglob("*"): path.chmod(0o777 if path.is_dir() else 0o666)
+    except shutil.Error:
+        raise Refused("registry_copy_failed") from None
+    except OSError as error:
+        raise Refused(registry_os_error(error)) from None
+
+
+
 def start(owner, owned, create_args, command, maximum):
+    if owned["phase"] == "prefetch":
+        require(command == prefetch_command(), "registry_prefetch_command")
+        require(type(maximum) in (int, float) and 0 < maximum <= 300, "registry_prefetch_deadline")
+        command = ["python3", "-I", "-B", "-c", REGISTRY_PREFETCH_GUEST,
+                   json.dumps(command, separators=(",", ":")), str(maximum)]
     raw = owner.docker(create_args + command, 15)
     cid = raw.decode().strip(); require(re.fullmatch(r"[0-9a-f]{64}", cid), "container_id")
     owned["cid"] = cid
@@ -693,19 +807,14 @@ def compile(case, row, operation, verify, diagnostic=None):
         exporter.compiler(compiler_identity, RUST, HOST)
         failure_stage(diagnostic, "compile_prefetch")
         prefetch, args = container(owner, row, operation, "prefetch", source, registry, output)
-        start(owner, prefetch, args, ["cargo", "+" + RUST, "fetch", "--locked", "--manifest-path", "examples/game/Cargo.toml"],
-              min(300, owner.remaining(300)))
+        start(owner, prefetch, args, prefetch_command(), min(300, owner.remaining(300)))
         failure_stage(diagnostic, "compile_registry")
         require(not any((registry / name).exists() for name in ("credentials", "credentials.toml", "auth.json",
                         ".docker", ".codex", ".cursor", ".claude")), "registry_credentials_refused")
         # Cargo may update sqlite/lock bookkeeping even offline. Preserve the
         # prefetched seed and use a separate credential-free writable copy.
         runtime_registry = case / "runtime-registry"
-        for path in registry.rglob("*"):
-            require(not path.is_symlink(), "registry_alias_refused")
-        shutil.copytree(registry, runtime_registry, symlinks=False)
-        runtime_registry.chmod(0o777)
-        for path in runtime_registry.rglob("*"): path.chmod(0o777 if path.is_dir() else 0o666)
+        copy_registry(registry, runtime_registry)
         failure_stage(diagnostic, "compile_cargo")
         compiler, args = container(owner, row, operation, "compile", source, runtime_registry, output)
         # The runtime copy is writable public cache, never the host's CARGO_HOME.

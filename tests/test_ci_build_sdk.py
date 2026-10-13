@@ -6,6 +6,7 @@ public owner command boundary on Linux; it is not a physical SDK build.
 import ast
 import contextlib
 import copy
+import errno
 import io
 import hashlib
 import importlib.util
@@ -320,6 +321,162 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(observed[0]["sysroot_sha256"], observed[1]["sysroot_sha256"])
         self.assertEqual(observed[0]["executable_sha256"], observed[1]["executable_sha256"])
         self.assertEqual(observed[1]["sysroot_files"], {build.HOST: 1, build.TARGET: 1})
+
+
+    def _registry_guest(self):
+        namespace = {"__name__": "public_registry_test"}
+        exec(compile(build.REGISTRY_PREFETCH_GUEST, "public-registry-prefetch", "exec"), namespace)
+        return namespace
+
+    def test_public_cache_guest_normalizes_modes_without_changing_toy_bytes_or_root(self):
+        # Real public toy filesystem; no Docker/Linux UID ownership claim.
+        registry = self.root / "public-cache"; registry.mkdir(); registry.chmod(0o777)
+        for name in ("registry/index", "registry/cache", "registry/src/toy"):
+            (registry / name).mkdir(parents=True, exist_ok=True)
+        files = {".global-cache": b"public-sqlite-toy", ".package-cache": b"",
+                 "registry/index/config.json": b'{"public":true}',
+                 "registry/cache/toy.crate": b"public-crate-toy",
+                 "registry/src/toy/lib.rs": b"pub fn toy() {}\n"}
+        for name, value in files.items():
+            path = registry / name; path.write_bytes(value); path.chmod(0o600)
+        for path in registry.rglob("*"):
+            if path.is_dir(): path.chmod(0o700)
+        before = {name: ((registry / name).stat().st_ino, build.digest(value)) for name, value in files.items()}
+        guest = self._registry_guest()
+        counts = guest["normalize_registry"](registry, build.time.monotonic() + 10)
+        self.assertEqual(counts["files"], len(files))
+        self.assertEqual(counts["directories"], 5)
+        self.assertEqual(registry.stat().st_mode & 0o777, 0o777)
+        for path in registry.rglob("*"):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o755 if path.is_dir() else 0o644)
+        self.assertEqual({name: ((registry / name).stat().st_ino, build.digest((registry / name).read_bytes()))
+                          for name in files}, before)
+
+    def test_guest_cache_refuses_alias_special_hardlink_credentials_and_expired_deadline(self):
+        guest = self._registry_guest()
+        for kind, code in (("symlink", "registry_alias_refused"), ("fifo", "registry_entry_type"),
+                           ("hardlink", "registry_entry_type"), ("credentials", "registry_credentials_refused")):
+            registry = self.root / ("refuse-" + kind); registry.mkdir()
+            outside = self.root / ("outside-" + kind); outside.write_bytes(b"public-outside-toy"); outside.chmod(0o600)
+            if kind == "symlink": (registry / "alias").symlink_to(outside)
+            elif kind == "fifo": os.mkfifo(registry / "special")
+            elif kind == "hardlink": os.link(outside, registry / "alias")
+            else: (registry / "credentials.toml").write_bytes(b"public-sentinel-not-a-key")
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "^" + code + "$"):
+                guest["normalize_registry"](registry, build.time.monotonic() + 10)
+            self.assertEqual(outside.read_bytes(), b"public-outside-toy")
+            self.assertEqual(outside.stat().st_mode & 0o777, 0o600)
+        empty = self.root / "expired-cache"; empty.mkdir()
+        with self.assertRaisesRegex(ValueError, "^registry_prefetch_deadline$"):
+            guest["normalize_registry"](empty, build.time.monotonic() - 1)
+
+    def test_fetch_guest_normalizes_only_after_success_with_exact_two_targets(self):
+        guest = self._registry_guest(); command = build.prefetch_command()
+        self.assertEqual(command, ["cargo", "+1.98.1", "fetch", "--locked", "--manifest-path", "examples/game/Cargo.toml",
+                                   "--target", "wasm32-unknown-unknown", "--target", "aarch64-unknown-linux-gnu"])
+        registry = self.root / "fetch-cache"; registry.mkdir()
+        cached = registry / ".global-cache"; cached.write_bytes(b"public-cache-toy"); cached.chmod(0o600)
+        with patch.object(guest["subprocess"], "run", return_value=types.SimpleNamespace(returncode=17)) as fetch:
+            with self.assertRaises(SystemExit) as rejected:
+                guest["run_prefetch"](command, registry, 20)
+            self.assertEqual(rejected.exception.code, 17)
+            fetch.assert_called_once_with(command, check=False, timeout=20)
+        self.assertEqual(cached.stat().st_mode & 0o777, 0o600)
+        with patch.object(guest["subprocess"], "run", return_value=types.SimpleNamespace(returncode=0)) as fetch:
+            self.assertEqual(guest["run_prefetch"](command, registry, 20)["files"], 1)
+            fetch.assert_called_once_with(command, check=False, timeout=20)
+        self.assertEqual(cached.stat().st_mode & 0o777, 0o644)
+        with patch.object(guest["subprocess"], "run") as fetch, self.assertRaisesRegex(ValueError, "^registry_prefetch_command$"):
+            guest["run_prefetch"](command[:-2], registry, 20)
+        fetch.assert_not_called()
+
+    def test_actual_start_wraps_only_prefetch_inside_unchanged_container_contract(self):
+        # Actual start/container helpers; Docker transport and inspect are modeled.
+        cid = "6" * 64; removed = []
+        class Owner:
+            def __init__(self): self.containers = []; self.created = None
+            def journal(self): pass
+            def docker(self, argv, maximum):
+                if argv[0] == "create": self.created = argv; return cid.encode()
+                self_assert.assertEqual(argv, ["start", "--attach", cid])
+                return b'{"state":"public_registry_normalized"}'
+            def inspect(self, actual):
+                self_assert.assertEqual(actual, cid)
+                command = self.created[self.created.index(self_row["compiler_ref"]) + 1:]
+                mounts = []
+                for index, item in enumerate(self.created):
+                    if item == "--mount":
+                        raw = self.created[index + 1]; parts = dict(part.split("=", 1) for part in raw.split(",") if "=" in part)
+                        mounts.append({"Type": "bind", "Source": parts["src"], "Destination": parts["dst"],
+                                       "RW": not raw.endswith(",readonly")})
+                return {"Id": cid, "Name": "/" + owned["name"], "Image": self_row["compiler_image"],
+                    "Config": {"Labels": {"online.harmony.operation": owned["operation"]}, "User": "65532:65532",
+                        "Entrypoint": ["/usr/bin/env"], "Env": self_row["image_environment"], "Cmd": command},
+                    "State": {"ExitCode": 0}, "Mounts": mounts,
+                    "HostConfig": {"ReadonlyRootfs": True, "Memory": 8 * 1024**3, "MemorySwap": 8 * 1024**3,
+                        "PidsLimit": 256, "CapDrop": ["ALL"], "NanoCpus": 2_000_000_000,
+                        "NetworkMode": "bridge" if owned["phase"] == "prefetch" else "none", "CpusetCpus": "0,1",
+                        "SecurityOpt": ["no-new-privileges"], "Privileged": False, "PidMode": "", "IpcMode": "private",
+                        "CgroupnsMode": "private", "Tmpfs": {"/tmp": "rw,nosuid,nodev,noexec,size=512m,mode=1777"}}}
+            def remove(self, entry): removed.append(entry)
+        self_assert, self_row = self, self.row
+        for phase, requested in (("prefetch", build.prefetch_command()), ("compile", ["cargo", "+1.98.1", "build"])):
+            owner = Owner(); owned, args = build.container(owner, self.row, self.env["SDK_OPERATION"], phase,
+                                                          self.root / "source", self.root / "registry", self.root / "output")
+            build.start(owner, owned, args, requested, 20)
+            actual = owner.created[owner.created.index(self.row["compiler_ref"]) + 1 + 1 + len(build.COMPILER_ENV):]
+            if phase == "prefetch":
+                self.assertEqual(actual[:4], ["python3", "-I", "-B", "-c"])
+                self.assertEqual(actual[4], build.REGISTRY_PREFETCH_GUEST)
+                self.assertEqual(json.loads(actual[5]), requested)
+                self.assertEqual(float(actual[6]), 20)
+            else: self.assertEqual(actual, requested)
+            self.assertEqual(len(owner.containers), 1)
+            self.assertIs(removed[-1], owned)
+
+    def test_host_copy_errors_are_finite_redacted_and_keep_compile_owner_close(self):
+        sentinel = "PRIVATE_CACHE_PATH_AND_PAYLOAD_DO_NOT_EMIT"
+        cases = [(PermissionError(errno.EACCES, sentinel, sentinel), "registry_permission_denied"),
+                 (OSError(errno.ENOSPC, sentinel, sentinel), "registry_no_space"),
+                 (OSError(errno.EDQUOT, sentinel, sentinel), "registry_quota_exceeded"),
+                 (OSError(errno.EROFS, sentinel, sentinel), "registry_read_only"),
+                 (OSError(errno.EIO, sentinel, sentinel), "registry_io_failure"),
+                 (OSError(errno.ENOENT, sentinel, sentinel), "registry_entry_missing"),
+                 (OSError(errno.EBUSY, sentinel, sentinel), "registry_os_error"),
+                 (build.shutil.Error([(sentinel, sentinel, sentinel)]), "registry_copy_failed")]
+        for error, expected in cases:
+            with self.subTest(expected=expected), patch.object(build.shutil, "copytree", side_effect=error):
+                value, commands, output = self._compile_failure("compile")
+            self.assertEqual(value["failure_stage"], "compile_registry")
+            self.assertEqual(value["refusal_code"], expected)
+            self.assertTrue(value["owner_close_succeeded"])
+            self.assertIsNone(value["cleanup_refusal_code"])
+            self.assertEqual(commands[-1][0], "prefetch")
+            self.assertNotIn(sentinel, output)
+
+    def test_host_runtime_copy_preserves_normalized_seed_and_refuses_special_entries(self):
+        registry = self.root / "seed"; registry.mkdir(); registry.chmod(0o777)
+        (registry / "src").mkdir(); (registry / "src").chmod(0o755)
+        (registry / "src/lib.rs").write_bytes(b"pub fn public_toy() {}\n")
+        (registry / "src/lib.rs").chmod(0o644)
+        (registry / ".global-cache").write_bytes(b"public-cache-toy"); (registry / ".global-cache").chmod(0o644)
+        before = {str(path.relative_to(registry)): (path.stat().st_ino, path.stat().st_mode & 0o777,
+                  None if path.is_dir() else build.digest(path.read_bytes())) for path in registry.rglob("*")}
+        runtime = self.root / "runtime"; build.copy_registry(registry, runtime)
+        self.assertEqual(runtime.stat().st_mode & 0o777, 0o777)
+        for path in runtime.rglob("*"):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o777 if path.is_dir() else 0o666)
+            if path.is_file(): self.assertEqual(path.read_bytes(), (registry / path.relative_to(runtime)).read_bytes())
+        self.assertEqual({str(path.relative_to(registry)): (path.stat().st_ino, path.stat().st_mode & 0o777,
+                         None if path.is_dir() else build.digest(path.read_bytes())) for path in registry.rglob("*")}, before)
+        for kind, code in (("symlink", "registry_alias_refused"), ("fifo", "registry_entry_type")):
+            special = registry / ("special-" + kind)
+            if kind == "symlink": special.symlink_to(registry / "src/lib.rs")
+            else: os.mkfifo(special)
+            with self.subTest(kind=kind), self.assertRaisesRegex(build.Refused, "^" + code + "$"):
+                build.copy_registry(registry, self.root / ("runtime-" + kind))
+            special.unlink()
+
 
 
 
