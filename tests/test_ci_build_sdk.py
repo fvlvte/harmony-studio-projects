@@ -688,4 +688,67 @@ class ProducerTest(unittest.TestCase):
                 self.assertEqual(public["refusal_code"], "memory_pressure")
                 self.assertNotIn("PRIVATE_PSI_PAYLOAD_DO_NOT_EMIT", json.dumps(public))
 
+
+    def test_thin_lto_override_reaches_real_compile_container_and_changes_fingerprint(self):
+        # Actual main/compile/container caller, modeled transport only. This is
+        # not an SDK build, a Docker workload or a memory-improvement claim.
+        observed = []
+        real_container = build.container
+        def capture(*args, **kwargs):
+            owned, argv = real_container(*args, **kwargs)
+            observed.append((owned["phase"], argv))
+            return owned, argv
+        with patch.object(build, "container", side_effect=capture):
+            value, commands, _ = self._compile_failure("compile")
+        argv = next(argv for phase, argv in observed if phase == "compile")
+        tail = argv[argv.index(self.row["compiler_ref"]) + 1:]
+        self.assertEqual(tail[0], "-i")
+        environment = dict(item.split("=", 1) for item in tail[1:])
+        self.assertEqual(environment.get("CARGO_PROFILE_WEB_RELEASE_LTO"), "thin")
+        self.assertEqual(build.PROFILE["lto"], environment["CARGO_PROFILE_WEB_RELEASE_LTO"])
+        self.assertEqual(build.PROFILE["codegen_units"], 1)
+        self.assertEqual(environment["CARGO_INCREMENTAL"], "0")
+        self.assertEqual(argv[argv.index("--memory") + 1], "8g")
+        self.assertEqual(argv[argv.index("--memory-swap") + 1], "8g")
+        self.assertEqual(argv[argv.index("--cpus") + 1], "2")
+        command = commands[-1][1]
+        self.assertEqual(command[command.index("--jobs") + 1], "1")
+        self.assertEqual(command[command.index("--profile") + 1], "web-release")
+        self.assertEqual(command[command.index("--bin") + 1], "harmony-games")
+        prior = dict(build.COMPILER_ENV); prior.pop("CARGO_PROFILE_WEB_RELEASE_LTO")
+        self.assertNotEqual(build.digest(build.canonical(environment)), build.digest(build.canonical(prior)))
+        self.assertEqual(environment, build.COMPILER_ENV)
+        self.assertEqual(value["failure_stage"], "compile_cargo")
+        self.assertTrue(value["owner_close_succeeded"])
+
+    def test_thin_private_profile_join_refuses_fat_receipt_without_approving_sdk(self):
+        # Real maintained selection and inventory join with a modeled public
+        # artifact row. No library body, private source, age or Docker is used.
+        sealing, selection, _ = build.evidence_modules()
+        _, exporter = build.helpers()
+        shared = {"source_revision": "a" * 64, "authorization_id": "00000000-0000-0000-0000-000000000001",
+            "input_inventory_sha256": "b" * 64,
+            "environment_policy_sha256": build.digest(build.canonical(build.COMPILER_ENV)),
+            "compiler": {"release": build.RUST, "host": build.HOST}, "target": build.TARGET,
+            "features": build.FEATURES, "profile": copy.deepcopy(build.PROFILE)}
+        artifact = {"public_path": "lib/wasm32-unknown-unknown/libtoy.rlib",
+            "compiler_output": "target/wasm32-unknown-unknown/web-release/deps/libtoy.rlib",
+            "target": build.TARGET, "role": "opaque_rlib"}
+        inventory = {"path": artifact["public_path"], "role": "opaque_rlib", "bytes": 8, "sha256": "d" * 64}
+        body = {**shared, "schema_version": 1, "state": "built_not_qualified", "resources_closed": True,
+            "files": [artifact], "artifact_inventory": [inventory]}
+        receipt = {**shared, "state": "COMPILED_CLOSURE_PRODUCED", "exit_code": 0, "timed_out": False,
+            "resources_closed": True, "unknown_owners": [], "artifact_inventory_sha256":
+            exporter.digest(exporter.canonical(exporter.plain_inventory(body["artifact_inventory"])))}
+        self.assertEqual(sealing.bound_artifact_selection(body, receipt, selection, exporter)[0]["path"], artifact["public_path"])
+        inaccurate = copy.deepcopy(receipt); inaccurate["profile"]["lto"] = "fat"
+        with self.assertRaisesRegex(ValueError, "receipt_context_drift"):
+            sealing.bound_artifact_selection(body, inaccurate, selection, exporter)
+        stale = copy.deepcopy(receipt)
+        prior = dict(build.COMPILER_ENV); prior.pop("CARGO_PROFILE_WEB_RELEASE_LTO")
+        stale["environment_policy_sha256"] = build.digest(build.canonical(prior))
+        with self.assertRaisesRegex(ValueError, "receipt_context_drift"):
+            sealing.bound_artifact_selection(body, stale, selection, exporter)
+        self.assertEqual(build.APPROVED_EXPORTS, {})
+
 if __name__ == "__main__": unittest.main()

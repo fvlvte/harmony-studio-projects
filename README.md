@@ -195,6 +195,28 @@ tiny libraries passed the real guard, exporter, mutation/source-extra refusal,
 restoration and downstream link controls; 1.98.1 tiny libraries passed a separate
 real format check. These are fixture controls, not full SDK approval.
 
+
+The current private producer profile proposal overrides only the frozen
+`web-release` LTO setting with the trusted
+`CARGO_PROFILE_WEB_RELEASE_LTO=thin` environment entry. Codegen units remain one;
+opt-level `s`, panic `abort`, no debug or incremental compilation, one Cargo job,
+8 GiB memory with no extra swap, two CPUs, and the original 3900-second deadline
+remain unchanged. The approved source archive, source catalog and compiler image
+are unchanged. Private candidate and Cargo receipts name Thin LTO and bind the
+new compiler-environment fingerprint; they must not describe those outputs as
+fat-LTO artifacts. The generic exporter can validate the distinct Thin-LTO
+profile, but the public consumer's existing fat-LTO catalog contract is unchanged
+and no compiled SDK/export approval is added.
+
+The producer builds the `harmony-games` Wasm binary as well as its dependency
+libraries, so this override changes the final binary's cross-crate LTO work.
+An rlib alone defers cross-crate optimization to a downstream final link. The
+failed tenth attempt reports a host-memory floor crossing without the active
+crate or compiler subphase; it does not show an OOM or prove that final LTO was
+the cause. The proposal is an unqualified artifact-profile change. Actual Rust
+1.98.1 invocation, host-memory behavior, file inventory, ABI, downstream link,
+optimized Wasm size and browser behavior still require fresh qualification.
+
 ## Rust compatibility and confidentiality
 
 A Rust `.rlib` does not bundle the full dependency graph. Downstream consumers

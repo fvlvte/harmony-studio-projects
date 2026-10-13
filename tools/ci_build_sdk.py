@@ -113,13 +113,15 @@ REPOSITORY = "fvlvte/harmony-studio-projects"
 RUST = "1.98.1"
 TARGET = "wasm32-unknown-unknown"
 HOST = "aarch64-unknown-linux-gnu"
-PROFILE = {"name": "web-release", "opt_level": "s", "lto": "fat", "codegen_units": 1,
+PROFILE = {"name": "web-release", "opt_level": "s", "lto": "thin", "codegen_units": 1,
            "panic": "abort", "debug": False, "incremental": False}
 FEATURES = ["web-webgl2"]
 COMPILER_ENV = {"PATH": "/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin",
     "HOME": "/tmp/home", "LANG": "C.UTF-8", "RUSTUP_HOME": "/usr/local/rustup",
     "RUSTUP_AUTO_INSTALL": "0", "CARGO_HOME": "/registry", "CARGO_TARGET_DIR": "/out/target",
     "CARGO_BUILD_BUILD_DIR": "/out/build", "CARGO_INCREMENTAL": "0",
+    # Trusted effective profile override; the approved source stays byte-identical.
+    "CARGO_PROFILE_WEB_RELEASE_LTO": "thin",
     "CARGO_ENCODED_RUSTFLAGS": '\x1f'.join(["--cfg", 'getrandom_backend="wasm_js"',
                                             "--remap-path-prefix=/sdk=/public-sdk"])}
 HEX = re.compile(r"[0-9a-f]{64}\Z")
