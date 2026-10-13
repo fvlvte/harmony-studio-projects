@@ -9,13 +9,13 @@ on:
         options: [checks, build]
         default: checks
       source_catalog:
-        description: Protected approved source catalog identifier (initially none)
+        description: Reviewed source ID sdk-webgl2-initial-d642105-rust1981-arm-v1
         type: string
       source_sha256:
         description: Exact approved encrypted archive SHA256
         type: string
       evidence_recipient:
-        description: Protected approved public evidence recipient identifier (initially none)
+        description: Reviewed public recipient ID root-age132-linux-arm-v1
         type: string
       operation_id:
         description: Fresh canonical UUID for this trusted producer attempt

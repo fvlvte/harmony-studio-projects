@@ -40,10 +40,11 @@ def candidate():
 
 class SelectionTest(unittest.TestCase):
     def test_empty_recipient_catalog_refuses_without_any_network_or_key(self):
-        self.assertEqual(seal.APPROVED_EVIDENCE_RECIPIENTS, {})
-        with patch.dict(os.environ, {"SDK_EVIDENCE_RECIPIENT": "unapproved"}, clear=True), \
-             patch.object(seal.urllib.request, "build_opener", side_effect=AssertionError("network reached")):
-            with self.assertRaisesRegex(ValueError, "evidence_recipient_unapproved"): seal.recipient()
+        with patch.object(seal, "APPROVED_EVIDENCE_RECIPIENTS", {}):
+            self.assertEqual(seal.APPROVED_EVIDENCE_RECIPIENTS, {})
+            with patch.dict(os.environ, {"SDK_EVIDENCE_RECIPIENT": "unapproved"}, clear=True), \
+                 patch.object(seal.urllib.request, "build_opener", side_effect=AssertionError("network reached")):
+                with self.assertRaisesRegex(ValueError, "evidence_recipient_unapproved"): seal.recipient()
 
     def test_exact_candidate_inventory_and_original_context_join(self):
         body, receipt = candidate(); selected = selection.exact_artifact_selection(body, receipt)

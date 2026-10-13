@@ -48,13 +48,14 @@ class ProducerTest(unittest.TestCase):
             "filenames": ["/out/target/wasm32-unknown-unknown/web-release/deps/libmoonlight-abc.rlib"]}
 
     def test_empty_catalog_refuses_before_helpers_key_or_network(self):
-        self.assertEqual(build.APPROVED_SOURCES, {})
-        self.assertEqual(build.APPROVED_EXPORTS, {})
-        with patch.dict(os.environ, self.env, clear=True), patch.object(build, "helpers") as helper:
-            result = build.main(["--phase", "prepare", "--case", str(self.root / "case")])
-        self.assertEqual(result, 78)
-        helper.assert_not_called()
-        self.assertFalse((self.root / "case").exists())
+        with patch.object(build, "APPROVED_SOURCES", {}):
+            self.assertEqual(build.APPROVED_SOURCES, {})
+            self.assertEqual(build.APPROVED_EXPORTS, {})
+            with patch.dict(os.environ, self.env, clear=True), patch.object(build, "helpers") as helper:
+                result = build.main(["--phase", "prepare", "--case", str(self.root / "case")])
+            self.assertEqual(result, 78)
+            helper.assert_not_called()
+            self.assertFalse((self.root / "case").exists())
 
     def test_only_manual_own_repository_exact_archive_and_public_ref_admitted(self):
         with patch.object(build, "APPROVED_SOURCES", {"fixture": self.row}):

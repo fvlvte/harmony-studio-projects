@@ -9,16 +9,35 @@ closure from encrypted engine inputs.
 
 ## Current status
 
-The reviewed initial source commit remains
-`d642105c37620107915cadc76442c368d1c0d1ef`. The current keyless Linux ARM checks
-at commit `42f9` passed all 71 tests with no skips. The public toolchain build and
-isolated identity probe also passed; neither qualifies the SDK or its runtime.
-Ten focused encrypted-evidence selection controls passed separately in the local
-Root-owned runner. Actual SDK production and cipher delivery have not run.
-No SDK release or GitHub secret has been created. Verification, trusted source,
-export and public-recipient catalogs start empty. A manual request refuses before
-network, decryption or Docker work unless its exact tuple is independently reviewed
-and entered in the applicable catalog.
+The reviewed encrypted source snapshot remains initial commit
+d642105c37620107915cadc76442c368d1c0d1ef, with 460 encrypted SDK files and
+18 reviewed public files. Fifth revision fe463eae91d44d48cb8efd4d48194f8f7bce2bbd
+passed both keyless Linux ARM check jobs: 90 tests each, zero failures or skips.
+The public compiler publication and anonymous initial encrypted archive retrieval
+also passed. These results establish input and delivery identities; they do not
+qualify the full SDK, its compiled metadata confidentiality, ABI or runtime.
+
+Protected source catalog sdk-webgl2-initial-d642105-rust1981-arm-v1 selects this
+single encrypted snapshot and immutable public compiler. Protected recipient
+catalog root-age132-linux-arm-v1 selects the reviewed public age recipient and
+Linux ARM binary. Verification, project and public SDK export catalogs remain
+empty. Actual full SDK production and encrypted compiled-evidence delivery have
+not run, and no GitHub decryption secret has been installed by these catalog rows.
+An unreviewed catalog identifier or archive hash still refuses before dependency,
+key, network or Docker work.
+
+For the build-sdk manual build mode, use source_catalog
+sdk-webgl2-initial-d642105-rust1981-arm-v1, source_sha256
+cac68c186bf9ba71692b6cbebf40b1ca39332059acfed099fe354e7eb8ecc1ce,
+evidence_recipient root-age132-linux-arm-v1, and a fresh canonical operation_id
+UUID. source_sha256 is the encrypted archive digest. Protected source_revision
+and input_inventory_sha256 are the 460-file inventory digest f8c25b87ef95a8f262ccca1cbb90f7aa9c94ceacaf34329e1d0e8aeeaf44ca1c;
+git_commit is initial d642, and the public harness revision is a separate identity.
+Authorization UUIDs remain protected row metadata, with no workflow
+authorization_id input. The new repository scoped decryption key, if separately
+authorized, belongs only in HARMONY_SDK_NEW_GITCRYPT_KEY_B64 for the prepare step.
+The evidence recipient is public; its private age identity stays local and is
+never a CI input. Catalog selection does not approve a public SDK export.
 
 The initial harness includes 24 bundle-guard tests, 7 exporter tests, 19 consumer
 tests and 9 producer tests. The toolchain probe adds 12 controls, including one
@@ -122,12 +141,12 @@ container. The probe keeps one 120-second budget through cleanup and receipt
 persistence. Its only uploaded artifact is the fixed public receipt after an
 actual successful probe exit; raw evidence stays in the ephemeral runner.
 Image-build provenance, SDK qualification and ABI qualification remain separate
-requirements. A passing probe does not establish those requirements. The proposed
-manual publication step targets this repository's own GHCR package with an explicit
-source label. Publication still requires a fresh image/probe join, immutable
-manifest and config identities, and actual anonymous public access. Those checks
-have not run for the publication candidate; the earlier local image ID is not a
-fetchable registry reference.
+requirements. A passing probe does not establish those requirements. The manual publication step targets this repository's own GHCR package with an
+explicit source label. Fifth run 38345197509 passed the fresh image/probe join,
+immutable manifest/config checks and actual anonymous public access. The reviewed
+source row pins the published manifest reference separately from its config ID.
+The earlier failed fourth publication remains failed. This public compiler
+publication does not qualify SDK source, compiled artifacts, ABI or runtime.
 
 The proposed producer return encrypts only the exact Cargo-bound compiled file
 inventory and fixed private metadata projections to an approved public age

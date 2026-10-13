@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Return only encrypted, source-bound compiled evidence; never approve an SDK.
 
-Recipient/tool authority is protected source. Both catalogs start empty. Only a
+Recipient/tool authority is protected source. Recipient entries require separate review. Only a
 public X25519 recipient reaches CI; private identity/keygen stays local to Root.
 """
 import argparse
@@ -21,7 +21,11 @@ import urllib.parse
 import urllib.request
 import uuid
 
-APPROVED_EVIDENCE_RECIPIENTS = {}
+APPROVED_EVIDENCE_RECIPIENTS = {'root-age132-linux-arm-v1': {'age_binary_bytes': 6540637,
+                              'age_binary_sha256': '41b072352f4561018949623c674d16ef704019b9108a9bbdbd21292efebfc94f',
+                              'authorization_id': '1983a072-6dbd-453c-b8a4-24e1a8ef1f10',
+                              'qualification_receipt_sha256': 'c70cea151b7a8b26522ba95fc5aaab1eecec3e55609706b33d475c14a21a60d5',
+                              'recipient': 'age1v0w3kt6zs3jt8ppahv2qlkk7s4rd995a6ssdha3zflgg4l4q3s8ql6xzcn'}}
 VERSION = "1.3.2"
 ARCHIVE_URL = "https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-arm64.tar.gz"
 ARCHIVE_SHA = "6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4"
