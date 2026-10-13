@@ -45,6 +45,13 @@ class Refused(ValueError):
     pass
 
 
+class ResourceRefused(Refused):
+    """Fixed refusal code plus numeric runner-host observations, never paths."""
+    def __init__(self, code, sample):
+        super().__init__(code)
+        self.resource_sample = sample
+
+
 def require(value, code):
     if not value:
         raise Refused(code)
@@ -149,10 +156,15 @@ def linux_resources():
     for line in Path("/proc/meminfo").read_text().splitlines():
         key, value = line.split(":", 1)
         fields[key] = int(value.split()[0]) * 1024
-    require(fields["MemTotal"] >= 16_000_000_000 and fields["MemAvailable"] * 100 >= fields["MemTotal"] * 40, "resource_floor")
+    sample = {"mem_total": fields["MemTotal"], "mem_available": fields["MemAvailable"],
+              "memory_psi_avg10": None}
+    if not (fields["MemTotal"] >= 16_000_000_000 and fields["MemAvailable"] * 100 >= fields["MemTotal"] * 40):
+        raise ResourceRefused("resource_floor", sample)
     psi = Path("/proc/pressure/memory").read_text()
     samples = re.findall(r"^(?:some|full) avg10=([0-9.]+)", psi, re.MULTILINE)
-    require(len(samples) == 2 and all(float(value) == 0 for value in samples), "memory_pressure")
+    if not (len(samples) == 2 and all(float(value) == 0 for value in samples)):
+        sample["memory_psi_avg10"] = [float(value) for value in samples] if len(samples) == 2 else None
+        raise ResourceRefused("memory_pressure", sample)
     require({0, 1} <= os.sched_getaffinity(0), "cpu_affinity")
     return {"mem_total": fields["MemTotal"], "mem_available": fields["MemAvailable"], "memory_psi_avg10": samples}
 
@@ -224,7 +236,7 @@ class Owner:
         deadline = time.monotonic() + self.remaining(maximum, cleanup)
         input_path = self.evidence / ("stdin-" + uuid.uuid4().hex)
         input_stream = None; row = None; selector = None; drained = False
-        stdout = bytearray(); total = 0
+        stdout = bytearray(); total = 0; resource_error = None
         log = self.evidence / ("cli-" + uuid.uuid4().hex + ".log")
         try:
             if data is not None:
@@ -256,12 +268,21 @@ class Owner:
             require(self.finish(row, natural=True), "cli_cleanup_unknown")
             require(row["returncode"] == 0, "command_failed")
             return bytes(stdout)
+        except ResourceRefused as error:
+            resource_error = error
+            raise
         finally:
             try:
-                if row is not None and not row["reaped"]: self.finish(row, natural=drained)
-            finally:
-                if selector is not None: selector.close()
-                if input_stream is not None: input_stream.close()
+                try:
+                    if row is not None and not row["reaped"]: self.finish(row, natural=drained)
+                finally:
+                    if selector is not None: selector.close()
+                    if input_stream is not None: input_stream.close()
+            except BaseException:
+                # Keep the original resource refusal; retained Owner rows still
+                # require the caller's separate close/closure authority.
+                if resource_error is None:
+                    raise
 
     def docker(self, args, maximum=10, **kwargs):
         return self.command(self.docker_argv(args), maximum, **kwargs)

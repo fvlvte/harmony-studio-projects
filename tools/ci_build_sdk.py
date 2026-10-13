@@ -15,6 +15,7 @@ import errno
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -199,11 +200,39 @@ def failure_stage(diagnostic, stage):
         diagnostic["failure_stage"] = stage if stage in FAILURE_STAGES else "internal_error"
 
 
+def resource_observation(error):
+    """Project only bounded host numbers from the two existing resource refusals."""
+    if refusal_code(error) not in {"resource_floor", "memory_pressure"}:
+        return None
+    attributes = getattr(error, "__dict__", None)
+    sample = attributes.get("resource_sample") if type(attributes) is dict else None
+    if type(sample) is not dict or set(sample) != {"mem_total", "mem_available", "memory_psi_avg10"}:
+        return None
+    total, available = sample["mem_total"], sample["mem_available"]
+    if (type(total) is not int or type(available) is not int
+            or not 0 <= available <= total <= 2**63 - 1):
+        return None
+    values = sample["memory_psi_avg10"]
+    if values is not None:
+        if type(values) is not list or len(values) != 2:
+            return None
+        if any(type(value) not in (int, float) or not 0 <= value <= 100
+               or not math.isfinite(value) for value in values):
+            return None
+        values = [float(value) for value in values]
+    return {"scope": "runner_host", "mem_total": total, "mem_available": available,
+            "memory_psi_avg10": values}
+
+
 def public_failure(error, diagnostic):
-    return {"failure_stage": diagnostic["failure_stage"], "refusal_code": refusal_code(error),
-            "owner_close_called": diagnostic["owner_close_called"],
-            "owner_close_succeeded": diagnostic["owner_close_succeeded"],
-            "cleanup_refusal_code": diagnostic["cleanup_refusal_code"]}
+    value = {"failure_stage": diagnostic["failure_stage"], "refusal_code": refusal_code(error),
+             "owner_close_called": diagnostic["owner_close_called"],
+             "owner_close_succeeded": diagnostic["owner_close_succeeded"],
+             "cleanup_refusal_code": diagnostic["cleanup_refusal_code"]}
+    observation = resource_observation(error)
+    if observation is not None:
+        value["resource_observation"] = observation
+    return value
 
 
 def canonical(value):

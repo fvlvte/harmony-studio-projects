@@ -19,7 +19,7 @@ import time
 import uuid
 
 IMAGE = "harmony-public-toolchain:unqualified"
-OWNER_SHA = "2dba26e4c5cf05f75a96973350d61959f64f6645322e6ce8a413b5ed13e328eb"
+OWNER_SHA = "16e6a7a77ca5e1c6fc443514e9207a6a4ee82da6780613f6c2bc9aea6bb54bd3"
 CONTEXT = [{'path': '.dockerignore', 'bytes': 109, 'sha256': '5458823ca8d5515f72bc59af26980774f2967bb0e166e5baa27d015e1d241c90'}, {'path': 'Dockerfile', 'bytes': 1525, 'sha256': '7d2dd2c7a6565aa81d03c7db45cad52ac27c81d6dfd1cecd616cb842e5302c20'}, {'path': 'README.md', 'bytes': 3188, 'sha256': '94637eea115d8c8756b63ca11ea4ecf4ce5fa743323c1eed42f82c6678d37842'}]
 CONTEXT_SHA = '81eeed9ce37a094030fc2b5d1921c2c8bee191df7486a4c3bde00e4aec0d3734'
 ENV = {"PATH": "/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin", "RUSTUP_HOME": "/usr/local/rustup",

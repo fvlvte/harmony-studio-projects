@@ -480,4 +480,153 @@ class ProducerTest(unittest.TestCase):
 
 
 
+
+    def _resource_probe(self, total_kib=20_000_000, available_kib=12_000_000,
+                        psi="some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"):
+        # Actual public Linux-resource function; kernel files/platform are modeled.
+        verify, _ = build.helpers()
+        reads = []
+        class KernelFile:
+            def __init__(self, name): self.name = str(name)
+            def read_text(self):
+                reads.append(self.name)
+                if self.name == "/proc/meminfo":
+                    return f"MemTotal: {total_kib} kB\nMemAvailable: {available_kib} kB\n"
+                self_assert.assertEqual(self.name, "/proc/pressure/memory")
+                return psi
+        self_assert = self
+        with patch.object(verify, "Path", KernelFile), \
+             patch.object(verify.platform, "system", return_value="Linux"), \
+             patch.object(verify.platform, "machine", return_value="aarch64"), \
+             patch.object(verify.os, "sched_getaffinity", return_value={0, 1}, create=True):
+            try:
+                value, error = verify.linux_resources(), None
+            except verify.Refused as refused:
+                value, error = None, refused
+        return verify, value, error, reads
+
+    def test_actual_host_pressure_refusal_carries_numbers_without_changing_zero_success(self):
+        verify, value, error, reads = self._resource_probe(available_kib=8_000_000)
+        self.assertIsNone(error)
+        self.assertEqual(value, {"mem_total": 20_000_000 * 1024, "mem_available": 8_000_000 * 1024,
+                                 "memory_psi_avg10": ["0.00", "0.00"]})
+        self.assertEqual(reads, ["/proc/meminfo", "/proc/pressure/memory"])
+        for some, full in (("0.01", "0.00"), ("0.00", "0.02"), ("0.000001", "0.00")):
+            with self.subTest(some=some, full=full):
+                verify, value, error, _ = self._resource_probe(
+                    psi=f"some avg10={some} avg60=0.00 avg300=0.00 total=1\nfull avg10={full} avg60=0.00 avg300=0.00 total=0\n")
+                self.assertIsNone(value)
+                self.assertIsInstance(error, verify.ResourceRefused)
+                self.assertEqual(error.args, ("memory_pressure",))
+                self.assertEqual(build.resource_observation(error), {
+                    "scope": "runner_host", "mem_total": 20_000_000 * 1024,
+                    "mem_available": 12_000_000 * 1024, "memory_psi_avg10": [float(some), float(full)]})
+        verify, _, error, _ = self._resource_probe(psi="some avg10=0.01 avg60=0.00 avg300=0.00 total=1\n")
+        self.assertIsInstance(error, verify.ResourceRefused)
+        self.assertEqual(error.args, ("memory_pressure",))
+        self.assertIsNone(build.resource_observation(error)["memory_psi_avg10"])
+
+    def test_resource_floor_keeps_original_order_threshold_and_unobserved_psi(self):
+        for total, available in ((20_000_000, 7_999_999), (15_624_999, 15_624_999)):
+            with self.subTest(total=total, available=available):
+                verify, value, error, reads = self._resource_probe(total, available)
+                self.assertIsNone(value)
+                self.assertIsInstance(error, verify.ResourceRefused)
+                self.assertEqual(error.args, ("resource_floor",))
+                self.assertEqual(reads, ["/proc/meminfo"])
+                self.assertEqual(build.resource_observation(error), {
+                    "scope": "runner_host", "mem_total": total * 1024,
+                    "mem_available": available * 1024, "memory_psi_avg10": None})
+
+    def test_resource_projection_refuses_extra_untyped_nonfinite_and_unbounded_values(self):
+        base = {"mem_total": 20_000_000 * 1024, "mem_available": 12_000_000 * 1024,
+                "memory_psi_avg10": [0.01, 0.0]}
+        bad = [
+            {**base, "private_path": "PRIVATE_RESOURCE_PAYLOAD_DO_NOT_EMIT"},
+            {**base, "mem_total": True}, {**base, "mem_available": "PRIVATE_RESOURCE_PAYLOAD_DO_NOT_EMIT"},
+            {**base, "mem_total": 2**63}, {**base, "mem_available": base["mem_total"] + 1},
+            {**base, "memory_psi_avg10": [float("nan"), 0.0]},
+            {**base, "memory_psi_avg10": [float("inf"), 0.0]},
+            {**base, "memory_psi_avg10": [-0.01, 0.0]},
+            {**base, "memory_psi_avg10": [100.01, 0.0]},
+            {**base, "memory_psi_avg10": [2**4096, 0.0]},
+            {**base, "memory_psi_avg10": [True, 0.0]},
+            {**base, "memory_psi_avg10": ["PRIVATE_RESOURCE_PAYLOAD_DO_NOT_EMIT", 0.0]},
+            {**base, "memory_psi_avg10": [0.0]}, {**base, "memory_psi_avg10": (0.0, 0.0)},
+        ]
+        diagnostic = {"failure_stage": "compile_cargo", "owner_close_called": True,
+                      "owner_close_succeeded": True, "cleanup_refusal_code": None}
+        for sample in bad:
+            with self.subTest(sample_type=type(sample["memory_psi_avg10"]).__name__):
+                error = build.Refused("memory_pressure"); error.resource_sample = sample
+                self.assertIsNone(build.resource_observation(error))
+                value = build.public_failure(error, diagnostic)
+                self.assertNotIn("resource_observation", value)
+                self.assertNotIn("PRIVATE_RESOURCE_PAYLOAD_DO_NOT_EMIT", json.dumps(value))
+        error = build.Refused("command_failed"); error.resource_sample = base
+        self.assertIsNone(build.resource_observation(error))
+
+    def test_compile_resource_observation_preserves_primary_when_cleanup_also_fails(self):
+        _, _, error, _ = self._resource_probe(
+            psi="some avg10=0.03 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+        for cleanup, code in ((False, "compiler_failed_or_unknown"),
+                              (ValueError("PRIVATE_CLEANUP_PAYLOAD_DO_NOT_EMIT"), "internal_error")):
+            with self.subTest(cleanup_code=code):
+                value, commands, output = self._compile_failure("compile", error=error, cleanup=cleanup)
+                self.assertEqual(value["failure_stage"], "compile_cargo")
+                self.assertEqual(value["refusal_code"], "memory_pressure")
+                self.assertFalse(value["owner_close_succeeded"])
+                self.assertEqual(value["cleanup_refusal_code"], code)
+                self.assertEqual(value["resource_observation"], {
+                    "scope": "runner_host", "mem_total": 20_000_000 * 1024,
+                    "mem_available": 12_000_000 * 1024, "memory_psi_avg10": [0.03, 0.0]})
+                self.assertEqual(commands[-1][0], "compile")
+                self.assertNotIn("PRIVATE_CLEANUP_PAYLOAD_DO_NOT_EMIT", output)
+
+    def test_other_failure_projection_is_unchanged_and_has_no_resource_field(self):
+        diagnostic = {"failure_stage": "compile_cargo", "owner_close_called": True,
+                      "owner_close_succeeded": True, "cleanup_refusal_code": None}
+        error = ValueError("PRIVATE_RESOURCE_PAYLOAD_DO_NOT_EMIT")
+        error.resource_sample = {"mem_total": 20_000_000 * 1024, "mem_available": 12_000_000 * 1024,
+                                 "memory_psi_avg10": [0.01, 0.0]}
+        self.assertEqual(build.public_failure(error, diagnostic), {
+            "failure_stage": "compile_cargo", "refusal_code": "internal_error",
+            "owner_close_called": True, "owner_close_succeeded": True, "cleanup_refusal_code": None})
+
+
+    def test_owner_command_resource_failure_survives_modeled_teardown_fault(self):
+        # Actual Owner.command, modeled child/selector; no process or Docker run.
+        for fault in ("finish", "selector"):
+            with self.subTest(fault=fault):
+                verify, _, resource_error, _ = self._resource_probe(
+                    psi="some avg10=0.03 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+                owner = object.__new__(verify.Owner)
+                owner.evidence = self.root / ("modeled-command-" + fault); owner.evidence.mkdir(mode=0o700)
+                row = {"process": types.SimpleNamespace(stdout=object(), stderr=object()),
+                       "reaped": False, "group_closed": False}
+                owner.children = [row]
+                class Selector:
+                    closed = False
+                    def register(self, *args): pass
+                    def get_map(self): return {"modeled": object()}
+                    def close(self):
+                        self.closed = True
+                        if fault == "selector": raise verify.Refused("cli_cleanup_unknown")
+                selector = Selector()
+                teardown = verify.Refused("cli_cleanup_unknown") if fault == "finish" else None
+                with patch.object(owner, "remaining", return_value=10), \
+                     patch.object(owner, "spawn", return_value=row), \
+                     patch.object(owner, "finish", side_effect=teardown, return_value=False) as finish, \
+                     patch.object(verify.selectors, "DefaultSelector", return_value=selector), \
+                     patch.object(verify, "linux_resources", side_effect=resource_error), \
+                     self.assertRaises(verify.Refused) as caught:
+                    owner.command(["public-modeled-command"], 10)
+                self.assertIs(caught.exception, resource_error)
+                self.assertEqual(caught.exception.args, ("memory_pressure",))
+                self.assertEqual(build.resource_observation(caught.exception)["memory_psi_avg10"], [0.03, 0.0])
+                finish.assert_called_once_with(row, natural=False)
+                self.assertTrue(selector.closed)
+                self.assertIs(owner.children[0], row)
+                self.assertFalse(row["group_closed"])
+
 if __name__ == "__main__": unittest.main()
