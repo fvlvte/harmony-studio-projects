@@ -3,6 +3,8 @@ __pycache__/
 .verify-runs/
 .verify-public/
 .verify-public-stage-*/
+.toolchain-private/
+.toolchain-public/
 target/
 dist/
 .env

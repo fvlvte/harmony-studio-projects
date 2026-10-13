@@ -9,17 +9,21 @@ closure from encrypted engine inputs.
 
 ## Current status
 
-The repository bootstrap is prepared locally. The GitHub repository is public
-and initially empty; no initial commit, push, workflow execution, SDK release or
-GitHub secret has been created by this work. Both verification catalogs and the
+The reviewed initial commit is published on `main` as
+`d642105c37620107915cadc76442c368d1c0d1ef`. Keyless public checks passed on the
+Linux ARM runner: 59 tests passed with no skips. The public toolchain image also
+built successfully; that build alone does not qualify the SDK or its runtime.
+No SDK release or GitHub secret has been created. Both verification catalogs and the
 trusted producer's source/export catalogs are deliberately empty. A manual
 verification/build request refuses before network, decryption or Docker work
 unless its tuple has been reviewed and entered in the applicable catalog.
 
-Local evidence includes 24 bundle-guard tests, 7 exporter tests, 19 consumer
-tests and 9 producer tests. Two Linux-only finite-child cases are skipped on
-macOS; a separate real Linux child/process-group control passed in a dedicated
-local container. Actual tiny Rust compiler/link controls ran separately under
+The initial harness includes 24 bundle-guard tests, 7 exporter tests, 19 consumer
+tests and 9 producer tests. The toolchain probe adds 12 controls, including one
+Linux-only finite-child check. The three Linux-only cases are skipped on macOS;
+the initial two passed in GitHub's keyless Linux checks. Docker and image
+observations in the probe's unit tests are modeled. Actual tiny Rust compiler/link
+controls ran separately under
 1.98.1 and 1.99.0. Each compiled a generic engine and its
 dependency for Wasm, linked a separate consumer using only the library closure,
 rejected a missing dependency, accepted the restored dependency and rejected a
@@ -35,10 +39,10 @@ Actions and public review. Keep engine source and private SDK inputs outside
 those plaintext directories. Never put a credential, key, transcript or private
 receipt in a plaintext exception.
 
-The 454 reviewed SDK files and six trusted starter files are prepared under
-`engine/sdk`. Their 460 staged Git blobs have been checked for git-crypt's
-ciphertext header and decrypted back to the exact reviewed hashes. This local
-index check created no commit or publication.
+The 454 reviewed SDK files and six trusted starter files are committed under
+`engine/sdk`. Their 460 Git blobs were checked for git-crypt's ciphertext header
+and decrypted back to the exact reviewed hashes before publication. A sample
+retrieved from GitHub was independently confirmed to contain ciphertext.
 
 Git-crypt protects selected Git blobs at rest. It does not hide file names, Git
 history metadata, decrypted files or compiler diagnostics. Do not run generated
@@ -68,6 +72,7 @@ python3 -I -B -W error -m unittest discover -s tests -p 'test_bundle_guard.py' -
 python3 -I -B -W error -m unittest discover -s tests -p 'test_opaque_sdk.py' -v
 python3 -I -B -W error -m unittest discover -s tests -p 'test_ci_verify.py' -v
 python3 -I -B -W error -m unittest discover -s tests -p 'test_ci_build_sdk.py' -v
+python3 -I -B -W error -m unittest discover -s tests -p 'test_probe_toolchain.py' -v
 ```
 
 The real consumer harness requires Linux and Docker. SDK/project assets come
@@ -108,9 +113,14 @@ The existing local compiler image contains private Harmony verifier scripts and
 must not be published as the public toolchain. [The toolchain pilot](toolchain/README.md)
 uses an observed immutable official Rust ARM64 base and public Debian tools. Its
 Dockerfile has no `COPY` or `ADD`. The manual workflow checks the dedicated
-context and can build a local unqualified image; it has no registry login,
-push or upload. Actual image/toolchain/package identity and process/container
-closure still require qualification.
+context and builds a local unqualified image without a registry login or push.
+Its follow-up probe measures the actual image ID, full compiler identity,
+standard-library inventory and public package versions in a separate isolated
+container. The probe keeps one 120-second budget through cleanup and receipt
+persistence. Its only uploaded artifact is the fixed public receipt after an
+actual successful probe exit; raw evidence stays in the ephemeral runner.
+Image-build provenance, SDK qualification and ABI qualification remain separate
+requirements. A passing probe does not establish those requirements.
 
 `opaque_sdk.py` is an explicit exporter, not a compiler or an approval service.
 It requires five independently pinned documents: policy, producer receipt,

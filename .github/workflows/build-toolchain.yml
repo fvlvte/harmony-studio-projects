@@ -68,6 +68,38 @@ jobs:
               --file toolchain/Dockerfile --tag harmony-public-toolchain:unqualified \
               toolchain > "$case_dir/build.private.log" 2>&1
           printf 'LOCAL_PUBLIC_TOOLCHAIN_IMAGE_BUILT_NOT_QUALIFIED\n'
-      # No SDK decryption, registry login/push or artifact/log upload step.
+      - name: Prepare public git-crypt tool inventory without keys
+        if: ${{ success() && inputs.mode == 'build' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if ! command -v git-crypt >/dev/null 2>&1; then
+            inventory_dir=$(mktemp -d "$RUNNER_TEMP/public-gitcrypt-inventory.XXXXXXXX")
+            timeout --signal=TERM --kill-after=15s 120s \
+              env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /bin/bash -c \
+                'sudo apt-get update && sudo apt-get install -y --no-install-recommends git-crypt' \
+              > "$inventory_dir/install.private.log" 2>&1
+          fi
+          printf 'PUBLIC_PREPARATION_TOOLS_AVAILABLE_NOT_QUALIFIED\n'
+      - name: Probe actual public toolchain identity and owned container closure
+        id: probe
+        if: ${{ success() && inputs.mode == 'build' }}
+        run: >-
+          python3 -I -B -W error tools/probe_toolchain.py
+          --image harmony-public-toolchain:unqualified
+          --context toolchain
+          --output .toolchain-public/receipt.json
+      - name: Public typed identity receipt only
+        if: ${{ success() && inputs.mode == 'build' && steps.probe.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: public-toolchain-identity-${{ github.run_id }}
+          path: .toolchain-public/receipt.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      # No SDK decryption, registry login/push, image upload, source or raw log
+      # upload. APT tool bytes are observed inventory, not source qualification.
       # Actual image identity, toolchain provenance, lifecycle and later public
       # publication require separate owner qualification and authorization.
