@@ -20,8 +20,8 @@ import uuid
 REPOSITORY = "fvlvte/harmony-studio-projects"
 REGISTRY = "ghcr.io/fvlvte/harmony-studio-projects/compiler"
 IMAGE = "harmony-public-toolchain:unqualified"
-PROBE_SHA = "d9d854d8352f35f11967619cdbdfd1766c020071867cea6c6a46a6ae4b50e957"
-OWNER_SHA = "16e6a7a77ca5e1c6fc443514e9207a6a4ee82da6780613f6c2bc9aea6bb54bd3"
+PROBE_SHA = "21d55e980148aabee6fb9a0f7bb076869f5ef201dd2b43107c0ec5857c4e12e5"
+OWNER_SHA = "8f25f44fa4803855e562d1b25b5ca2bef85ad9c93963d120be57649d60702381"
 STOP = None
 
 

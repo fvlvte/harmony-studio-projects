@@ -511,7 +511,8 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(value, {"mem_total": 20_000_000 * 1024, "mem_available": 8_000_000 * 1024,
                                  "memory_psi_avg10": ["0.00", "0.00"]})
         self.assertEqual(reads, ["/proc/meminfo", "/proc/pressure/memory"])
-        for some, full in (("0.01", "0.00"), ("0.00", "0.02"), ("0.000001", "0.00")):
+        for some, full in (("1.01", "0.00"), ("0.00", "1.02"), ("1.000001", "0.00"),
+                           ("1.00000000000000001", "0.00"), ("0.00", "1.00000000000000001")):
             with self.subTest(some=some, full=full):
                 verify, value, error, _ = self._resource_probe(
                     psi=f"some avg10={some} avg60=0.00 avg300=0.00 total=1\nfull avg10={full} avg60=0.00 avg300=0.00 total=0\n")
@@ -568,7 +569,7 @@ class ProducerTest(unittest.TestCase):
 
     def test_compile_resource_observation_preserves_primary_when_cleanup_also_fails(self):
         _, _, error, _ = self._resource_probe(
-            psi="some avg10=0.03 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+            psi="some avg10=1.03 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
         for cleanup, code in ((False, "compiler_failed_or_unknown"),
                               (ValueError("PRIVATE_CLEANUP_PAYLOAD_DO_NOT_EMIT"), "internal_error")):
             with self.subTest(cleanup_code=code):
@@ -579,7 +580,7 @@ class ProducerTest(unittest.TestCase):
                 self.assertEqual(value["cleanup_refusal_code"], code)
                 self.assertEqual(value["resource_observation"], {
                     "scope": "runner_host", "mem_total": 20_000_000 * 1024,
-                    "mem_available": 12_000_000 * 1024, "memory_psi_avg10": [0.03, 0.0]})
+                    "mem_available": 12_000_000 * 1024, "memory_psi_avg10": [1.03, 0.0]})
                 self.assertEqual(commands[-1][0], "compile")
                 self.assertNotIn("PRIVATE_CLEANUP_PAYLOAD_DO_NOT_EMIT", output)
 
@@ -599,7 +600,7 @@ class ProducerTest(unittest.TestCase):
         for fault in ("finish", "selector"):
             with self.subTest(fault=fault):
                 verify, _, resource_error, _ = self._resource_probe(
-                    psi="some avg10=0.03 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+                    psi="some avg10=1.03 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
                 owner = object.__new__(verify.Owner)
                 owner.evidence = self.root / ("modeled-command-" + fault); owner.evidence.mkdir(mode=0o700)
                 row = {"process": types.SimpleNamespace(stdout=object(), stderr=object()),
@@ -623,10 +624,68 @@ class ProducerTest(unittest.TestCase):
                     owner.command(["public-modeled-command"], 10)
                 self.assertIs(caught.exception, resource_error)
                 self.assertEqual(caught.exception.args, ("memory_pressure",))
-                self.assertEqual(build.resource_observation(caught.exception)["memory_psi_avg10"], [0.03, 0.0])
+                self.assertEqual(build.resource_observation(caught.exception)["memory_psi_avg10"], [1.03, 0.0])
                 finish.assert_called_once_with(row, natural=False)
                 self.assertTrue(selector.closed)
                 self.assertIs(owner.children[0], row)
                 self.assertFalse(row["group_closed"])
+
+
+    def test_psi_policy_accepts_zero_observed_pressure_and_inclusive_one_percent(self):
+        # Actual helper, modeled kernel: this is project policy, not OOM proof.
+        for some, full in (("0", "0"), ("0.18", "0.18"), (".18", ".18"),
+                           ("1.0", "1.0"), ("1.0", "0.18"), ("0.18", "1.0")):
+            with self.subTest(some=some, full=full):
+                _, value, error, reads = self._resource_probe(
+                    available_kib=8_000_000,
+                    psi=f"some avg10={some} avg60=0.00 avg300=0.00 total=1\nfull avg10={full} avg60=0.00 avg300=0.00 total=0\n")
+                self.assertIsNone(error)
+                self.assertEqual(value, {"mem_total": 20_000_000 * 1024,
+                    "mem_available": 8_000_000 * 1024, "memory_psi_avg10": [some, full]})
+                self.assertEqual(reads, ["/proc/meminfo", "/proc/pressure/memory"])
+        _, value, error, _ = self._resource_probe(
+            psi="full avg10=1.0 avg60=0.00 avg300=0.00 total=0\nsome avg10=0.18 avg60=0.00 avg300=0.00 total=1\n")
+        self.assertIsNone(error)
+        self.assertEqual(value["memory_psi_avg10"], ["0.18", "1.0"])
+
+    def test_psi_duplicate_some_or_full_rows_refuse_without_projecting_samples(self):
+        for row in ("some", "full"):
+            with self.subTest(row=row):
+                line = f"{row} avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+                verify, value, error, _ = self._resource_probe(psi=line + line)
+                self.assertIsNone(value)
+                self.assertIsInstance(error, verify.ResourceRefused)
+                self.assertEqual(error.args, ("memory_pressure",))
+                self.assertIsNone(build.resource_observation(error)["memory_psi_avg10"])
+
+    def test_psi_complete_tokens_missing_rows_nonfinite_and_extra_fields_refuse_privately(self):
+        def row(kind="some", avg10="0.00", avg60="0.00", avg300="0.00", total="0"):
+            return f"{kind} avg10={avg10} avg60={avg60} avg300={avg300} total={total}\n"
+        full = row("full")
+        malformed = ["", row(), full, row() + full + row(), row() + full + "\n",
+                     row("other") + full, row() + full + "PRIVATE_PSI_PAYLOAD_DO_NOT_EMIT\n",
+                     row().replace(" avg60=", " avg10=0.00 avg60=") + full,
+                     row().rstrip("\n") + " PRIVATE_PSI_PAYLOAD_DO_NOT_EMIT\n" + full,
+                     row(avg60="nan") + full, row(avg300="inf") + full,
+                     row(avg60="100.01") + full, row(avg60="100.00000000000000001") + full,
+                     row(total=str(2**64)) + full]
+        for token in ("0.00suffix", "0.00e5", "0.00e-5", "1..0", "0.", "+1",
+                      "-0.01", "nan", "NaN", "inf", "Infinity", "1e309", "9" * 100):
+            malformed.append(row(avg10=token) + full)
+            malformed.append(row() + row("full", avg10=token))
+        diagnostic = {"failure_stage": "compile_cargo", "owner_close_called": True,
+                      "owner_close_succeeded": True, "cleanup_refusal_code": None}
+        for index, psi in enumerate(malformed):
+            with self.subTest(case=index):
+                verify, value, error, _ = self._resource_probe(psi=psi)
+                self.assertIsNone(value)
+                self.assertIsInstance(error, verify.ResourceRefused)
+                self.assertEqual(error.args, ("memory_pressure",))
+                self.assertEqual(build.resource_observation(error), {
+                    "scope": "runner_host", "mem_total": 20_000_000 * 1024,
+                    "mem_available": 12_000_000 * 1024, "memory_psi_avg10": None})
+                public = build.public_failure(error, diagnostic)
+                self.assertEqual(public["refusal_code"], "memory_pressure")
+                self.assertNotIn("PRIVATE_PSI_PAYLOAD_DO_NOT_EMIT", json.dumps(public))
 
 if __name__ == "__main__": unittest.main()

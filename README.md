@@ -115,6 +115,16 @@ a fixed public result and an exact admitted web inventory. A successful smoke
 check is browser boot evidence; complete game rules, reset, win and responsive
 layout checks need their own actual gameplay acceptance.
 
+The shared Linux ARM host-resource policy requires at least 16,000,000,000
+bytes of total memory and at least 40% available memory at each maintained check.
+Both some and full memory PSI avg10 percentages may be at most 1.0%.
+The parser requires exactly one complete record of each kind and refuses
+missing, duplicate, malformed or nonfinite values. This explicit project policy
+replaces the earlier exact-zero PSI rule; a host-pressure refusal does not prove
+container OOM. Numeric failure observations identify the runner host and contain
+no host paths, environment or raw error text. Compiler caps, the one-Cargo-job
+profile, deadlines and private diagnostic boundaries remain unchanged.
+
 The consumer retains its original 3,900-second deadline through final public
 copying, receipt persistence and output. Four focused controls reject late
 completion or interruption in the old implementation and pass after the fix;

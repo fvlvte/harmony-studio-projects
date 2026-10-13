@@ -9,6 +9,7 @@ boot evidence does not establish every gameplay interaction.
 import base64
 import hashlib
 import json
+from decimal import Decimal
 import os
 from pathlib import Path, PurePosixPath
 import platform
@@ -38,6 +39,7 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 WEB = {".html", ".css", ".js", ".mjs", ".wasm", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".otf", ".json"}
 MAX_FILE = 64 * 1024**2
 MAX_TREE = 512 * 1024**2
+MEMORY_PSI_AVG10_MAX = 1.0
 STOP = None
 
 
@@ -161,9 +163,22 @@ def linux_resources():
     if not (fields["MemTotal"] >= 16_000_000_000 and fields["MemAvailable"] * 100 >= fields["MemTotal"] * 40):
         raise ResourceRefused("resource_floor", sample)
     psi = Path("/proc/pressure/memory").read_text()
-    samples = re.findall(r"^(?:some|full) avg10=([0-9.]+)", psi, re.MULTILINE)
-    if not (len(samples) == 2 and all(float(value) == 0 for value in samples)):
-        sample["memory_psi_avg10"] = [float(value) for value in samples] if len(samples) == 2 else None
+    number = r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)"
+    row_pattern = rf"(some|full) avg10=({number}) avg60=({number}) avg300=({number}) total=([0-9]+)"
+    rows = {}
+    for line in psi.splitlines():
+        match = re.fullmatch(row_pattern, line)
+        if match is None or match[1] in rows or any(len(value) > 32 for value in match.groups()[1:]):
+            raise ResourceRefused("memory_pressure", sample)
+        averages = [Decimal(match[i]) for i in (2, 3, 4)]
+        if any(not value.is_finite() or not 0 <= value <= 100 for value in averages) or int(match[5]) > 2**64 - 1:
+            raise ResourceRefused("memory_pressure", sample)
+        rows[match[1]] = match[2]
+    if set(rows) != {"some", "full"}:
+        raise ResourceRefused("memory_pressure", sample)
+    samples = [rows["some"], rows["full"]]
+    sample["memory_psi_avg10"] = [float(value) for value in samples]
+    if any(Decimal(value) > Decimal(str(MEMORY_PSI_AVG10_MAX)) for value in samples):
         raise ResourceRefused("memory_pressure", sample)
     require({0, 1} <= os.sched_getaffinity(0), "cpu_affinity")
     return {"mem_total": fields["MemTotal"], "mem_available": fields["MemAvailable"], "memory_psi_avg10": samples}
