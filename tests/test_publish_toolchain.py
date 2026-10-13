@@ -177,5 +177,74 @@ class PublicationTest(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError): publication.document(raw)
 
 
+    def test_anonymous_blob_redirect_rebuilds_authority_and_keeps_exact_body_digest_joins(self):
+        # Actual Request/production redirect callback; synthetic HTTP bodies,
+        # no network, TLS override, real token, SDK, Docker or provider account.
+        import urllib.parse
+        import urllib.request
+        config_body = publication.canonical({"architecture": "arm64", "os": "linux",
+            "config": {"Env": ["PATH=/usr/bin"], "User": "65532:65532"}})
+        config_id = "sha256:" + publication.digest(config_body)
+        manifest_body = publication.canonical({"schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": {"digest": config_id}})
+        manifest_id = "sha256:" + publication.digest(manifest_body)
+        token_body = publication.canonical({"token": "MODELED_ANONYMOUS_READ_NOT_A_CREDENTIAL"})
+        redirected_url = "https://pkg-containers.githubusercontent.com/ghcr1/public-modeled-config"
+        requests = []
+        redirect_handlers = []
+        outer = self
+        class Response:
+            status = 200
+            def __init__(self, url, body, headers=None):
+                self.url = url; self.body = body; self.headers = headers or {}
+            def __enter__(self): return self
+            def __exit__(self, *unused): return False
+            def geturl(self): return self.url
+            def read(self, maximum): return self.body[:maximum]
+        class FakeOpener:
+            def open(self, request, timeout):
+                outer.assertEqual(timeout, 15)
+                requests.append(request.full_url)
+                parsed = urllib.parse.urlsplit(request.full_url)
+                if parsed.path == "/token":
+                    outer.assertEqual(urllib.parse.parse_qs(parsed.query), {"service": ["ghcr.io"],
+                        "scope": ["repository:fvlvte/harmony-studio-projects/compiler:pull"]})
+                    return Response(request.full_url, token_body)
+                if parsed.path.endswith("/manifests/" + manifest_id):
+                    return Response(request.full_url, manifest_body, {"Docker-Content-Digest": manifest_id})
+                outer.assertEqual(parsed.path, "/v2/fvlvte/harmony-studio-projects/compiler/blobs/" + config_id)
+                # urllib's do_request_ adds Host as an UNREDIRECTED header.
+                # The production callback must not carry it across origins.
+                request.add_unredirected_header("Host", "ghcr.io")
+                request.add_header("Cookie", "MODELED_COOKIE_NOT_A_CREDENTIAL")
+                request.add_header("Proxy-Authorization", "MODELED_PROXY_NOT_A_CREDENTIAL")
+                redirected = redirect_handlers[0].redirect_request(request, None, 302, "Found", {}, redirected_url)
+                forbidden = {"host", "authorization", "cookie", "proxy-authorization"}
+                outer.assertFalse(forbidden & {k.lower() for k, _ in redirected.header_items()})
+                outer.assertEqual(redirected.host, "pkg-containers.githubusercontent.com")
+                # Invoke real urllib header preparation only, never open/connect.
+                handler = urllib.request.HTTPHandler()
+                handler.parent = types.SimpleNamespace(addheaders=[])
+                prepared = handler.do_request_(redirected)
+                outer.assertEqual(prepared.get_header("Host"), "pkg-containers.githubusercontent.com")
+                return Response(redirected_url, config_body)
+        def fake_build_opener(*handlers):
+            redirect_handlers.extend(h for h in handlers if isinstance(h, urllib.request.HTTPRedirectHandler))
+            self.assertEqual(len(redirect_handlers), 1)
+            self.assertEqual(handlers[0].proxies, {})
+            return FakeOpener()
+        stdout = io.StringIO()
+        with patch.object(urllib.request, "build_opener", side_effect=fake_build_opener), contextlib.redirect_stdout(stdout):
+            publication.anonymous_child(manifest_id, config_id)
+        value = publication.document(stdout.getvalue().encode())
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(value["manifest_digest"], manifest_id)
+        self.assertEqual(value["image_id"], config_id)
+        self.assertEqual(value["manifest_media_type"], "application/vnd.oci.image.manifest.v1+json")
+        self.assertEqual(value["Config"], publication.document(config_body)["config"])
+        self.assertEqual((value["Architecture"], value["Os"]), ("arm64", "linux"))
+        self.assertNotIn("MODELED_ANONYMOUS_READ_NOT_A_CREDENTIAL", stdout.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

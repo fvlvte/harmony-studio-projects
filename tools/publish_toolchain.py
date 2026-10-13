@@ -97,7 +97,7 @@ def anonymous_child(manifest_digest, image_id):
                     and not parsed.fragment, "registry_redirect")
             # Anonymous scoped read bearer never crosses a registry redirect.
             safe_headers = {k: v for k, v in request.header_items()
-                            if k.lower() not in {"authorization", "cookie", "proxy-authorization"}}
+                            if k.lower() not in {"host", "authorization", "cookie", "proxy-authorization"}}
             return urllib.request.Request(new_url, headers=safe_headers, method="GET")
     redirects = RegistryRedirect()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), redirects)
