@@ -1,0 +1,68 @@
+name: verify-project
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Public fixture checks, or verification of a reviewed catalog tuple
+        type: choice
+        options: [checks, verify]
+        default: checks
+      sdk_catalog:
+        description: Reviewed SDK catalog identifier (verify only)
+        type: string
+      sdk_sha256:
+        description: Exact reviewed SDK archive SHA256 (verify only)
+        type: string
+      project_catalog:
+        description: Reviewed project catalog identifier (verify only)
+        type: string
+      project_sha256:
+        description: Exact reviewed project archive SHA256 (verify only)
+        type: string
+      run_id:
+        description: Fresh canonical UUID (verify only)
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.repository == github.event.repository.full_name }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 70
+    env:
+      VERIFY_MODE: ${{ inputs.mode }}
+      VERIFY_SDK: ${{ inputs.sdk_catalog }}
+      VERIFY_SDK_SHA256: ${{ inputs.sdk_sha256 }}
+      VERIFY_PROJECT: ${{ inputs.project_catalog }}
+      VERIFY_PROJECT_SHA256: ${{ inputs.project_sha256 }}
+      VERIFY_RUN_ID: ${{ inputs.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify selected mode
+        run: |
+          case "$VERIFY_MODE" in checks|verify) ;; *) exit 78 ;; esac
+      - name: Public fixture checks (no SDK, keys, provider or Docker)
+        if: ${{ inputs.mode == 'checks' }}
+        run: >-
+          python3 -I -B -W error -c
+          "import pathlib,sys,unittest; sys.path.insert(0,str(pathlib.Path.cwd())); suite=unittest.defaultTestLoader.discover('tests'); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(0 if result.wasSuccessful() else 1)"
+      - name: Verify immutable approved tuple
+        id: verify
+        if: ${{ inputs.mode == 'verify' }}
+        run: python3 -I -B -W error tools/ci_verify.py
+      - name: Public receipt and admitted web only
+        if: ${{ success() && inputs.mode == 'verify' && steps.verify.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: harmony-public-verification-${{ github.run_id }}
+          path: .verify-public/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

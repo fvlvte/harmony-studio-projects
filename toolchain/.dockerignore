@@ -1,0 +1,4 @@
+# Deny every filesystem payload. The Dockerfile has no COPY or ADD instruction.
+*
+!Dockerfile
+!.dockerignore

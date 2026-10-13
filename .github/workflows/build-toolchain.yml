@@ -1,0 +1,73 @@
+name: build-toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Static public-context checks or a local unqualified image build
+        type: choice
+        options: [checks, build]
+        default: checks
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harmony-public-toolchain-pilot
+  cancel-in-progress: false
+
+jobs:
+  toolchain:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'fvlvte/harmony-studio-projects' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    env:
+      TOOLCHAIN_MODE: ${{ inputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Refuse unsupported dispatch mode before any build
+        run: |
+          case "$TOOLCHAIN_MODE" in checks|build) ;; *) exit 78 ;; esac
+      - name: Check the exact public context and immutable ARM64 base
+        run: |
+          python3 -I -B - <<'PY'
+          import pathlib, re, stat
+          root = pathlib.Path('toolchain')
+          expected = {'Dockerfile', '.dockerignore', 'README.md'}
+          assert root.is_dir() and not root.is_symlink()
+          assert {p.name for p in root.iterdir()} == expected
+          for name in expected:
+              p = root / name
+              assert stat.S_ISREG(p.lstat().st_mode) and not p.is_symlink()
+              assert p.stat().st_size <= 65536
+          text = (root / 'Dockerfile').read_text()
+          instructions = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+          assert instructions[0] == 'FROM --platform=linux/arm64 rust:1.98.1-slim-bookworm@sha256:3ebe98baef5911f8461cf81ba05644374a3c5ef1f8a33db3977bd4175f5ff1fc'
+          assert not any(re.match(r'(?i)^(COPY|ADD)\b', line) for line in instructions)
+          assert 'ENTRYPOINT ["/usr/bin/env"]' in instructions
+          assert 'USER 65532:65532' in instructions
+          assert (root / '.dockerignore').read_text().splitlines()[1:] == ['*', '!Dockerfile', '!.dockerignore']
+          print('PUBLIC_TOOLCHAIN_CONTEXT_CHECKED_NOT_QUALIFIED')
+          PY
+      - name: Build a local runner image using only the public context
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          case_dir=$(mktemp -d "$RUNNER_TEMP/public-toolchain.XXXXXXXX")
+          mkdir -m 700 "$case_dir/docker"
+          printf '{}\n' > "$case_dir/docker/config.json"
+          chmod 600 "$case_dir/docker/config.json"
+          timeout --signal=TERM --kill-after=30s 900s \
+            env -i PATH=/usr/bin:/bin LANG=C.UTF-8 DOCKER_CONFIG="$case_dir/docker" \
+            docker build --platform linux/arm64 --network default \
+              --file toolchain/Dockerfile --tag harmony-public-toolchain:unqualified \
+              toolchain > "$case_dir/build.private.log" 2>&1
+          printf 'LOCAL_PUBLIC_TOOLCHAIN_IMAGE_BUILT_NOT_QUALIFIED\n'
+      # No SDK decryption, registry login/push or artifact/log upload step.
+      # Actual image identity, toolchain provenance, lifecycle and later public
+      # publication require separate owner qualification and authorization.

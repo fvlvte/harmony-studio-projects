@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.verify-runs/
+.verify-public/
+.verify-public-stage-*/
+target/
+dist/
+.env
+.env.*
+auth.json
+secrets/
+.keys/
+*.key
+*.pem
+git-crypt-key
+git-crypt.key
+

@@ -1,0 +1,79 @@
+name: build-sdk
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Public checks or trusted encrypted-source starter build
+        type: choice
+        options: [checks, build]
+        default: checks
+      source_catalog:
+        description: Protected approved source catalog identifier (initially none)
+        type: string
+      source_sha256:
+        description: Exact approved encrypted archive SHA256
+        type: string
+      operation_id:
+        description: Fresh canonical UUID for this trusted producer attempt
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harmony-trusted-sdk-producer
+  cancel-in-progress: false
+
+jobs:
+  producer:
+    if: ${{ github.repository == 'fvlvte/harmony-studio-projects' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 70
+    env:
+      SDK_MODE: ${{ inputs.mode }}
+      SDK_SOURCE: ${{ inputs.source_catalog }}
+      SDK_SOURCE_SHA256: ${{ inputs.source_sha256 }}
+      SDK_OPERATION: ${{ inputs.operation_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Refuse unsupported dispatch mode before any checks or secret step
+        run: |
+          case "$SDK_MODE" in checks|build) ;; *) exit 78 ;; esac
+      - name: Public keyless checks
+        if: ${{ inputs.mode == 'checks' }}
+        run: >-
+          python3 -I -B -W error -c
+          "import pathlib,sys,unittest; sys.path.insert(0,str(pathlib.Path.cwd())); suite=unittest.defaultTestLoader.discover('tests'); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(0 if result.wasSuccessful() else 1)"
+      - name: Admit exact protected source tuple before installing or exposing key
+        if: ${{ inputs.mode == 'build' }}
+        run: python3 -I -B -W error tools/ci_build_sdk.py --phase admit
+      - name: Install preparation tool (binary hash must match approved catalog)
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          umask 077
+          sudo apt-get update > "$RUNNER_TEMP/sdk-preparation-install.private.log" 2>&1
+          sudo apt-get install -y --no-install-recommends git-crypt >> "$RUNNER_TEMP/sdk-preparation-install.private.log" 2>&1
+      - name: Trusted decryption and exact source freeze; new scoped SDK key only
+        if: ${{ inputs.mode == 'build' }}
+        env:
+          SDK_NEW_GITCRYPT_KEY_B64: ${{ secrets.HARMONY_SDK_NEW_GITCRYPT_KEY_B64 }}
+        run: |
+          umask 077
+          python3 -I -B -W error tools/ci_build_sdk.py --phase prepare --case "$RUNNER_TEMP/harmony-trusted-sdk-$SDK_OPERATION"
+      - name: Credential-free dependency prefetch then network-none SDK starter compile
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          umask 077
+          env -i PATH=/usr/bin:/bin LANG=C.UTF-8 \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            GITHUB_REF="$GITHUB_REF" \
+            SDK_SOURCE="$SDK_SOURCE" SDK_SOURCE_SHA256="$SDK_SOURCE_SHA256" SDK_OPERATION="$SDK_OPERATION" \
+            python3 -I -B -W error tools/ci_build_sdk.py --phase compile --case "$RUNNER_TEMP/harmony-trusted-sdk-$SDK_OPERATION"
+      # No source/key/Cargo logs/private receipt/compiled candidate upload.
+      # A separately approved export catalog and actual ABI/consumer boundary
+      # are required before any future guarded SDK upload step is enabled.

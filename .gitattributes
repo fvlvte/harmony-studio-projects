@@ -1,0 +1,9 @@
+* filter=git-crypt diff=git-crypt
+/.gitattributes -filter -diff
+/.gitignore -filter -diff
+/README.md -filter -diff
+/.github/** -filter -diff
+/tools/** -filter -diff
+/tests/** -filter -diff
+/policy/** -filter -diff
+/toolchain/** -filter -diff
