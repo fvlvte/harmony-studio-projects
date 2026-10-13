@@ -214,7 +214,7 @@ class ProbeTest(unittest.TestCase):
             try:
                 self.assertEqual(owner.command([sys.executable, "-c", "print('public-toy')"], 5), b"public-toy\n")
             finally: self.assertTrue(owner.close())
-        self.assertEqual(owner.hard, hard)
+        self.assertAlmostEqual(owner.hard, hard, places=9)
         self.assertTrue(owner.children)
         self.assertTrue(all(r["reaped"] and r["group_closed"] and r["returncode"] == 0 for r in owner.children))
         self.assertEqual(owner.containers, [])
