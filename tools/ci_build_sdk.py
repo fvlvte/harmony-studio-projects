@@ -135,6 +135,74 @@ def require(ok, code):
         raise Refused(code)
 
 
+
+# Frozen literal codes from this producer, the public owner/resource/download
+# helpers, and the public compiler-identity validator. Never echo exception text
+# based on a regex or dynamically extend this set from a runtime dependency.
+PUBLIC_REFUSAL_CODES = frozenset({
+    'artifact_collision', 'artifact_directory_alias', 'artifact_metadata_invalid',
+    'artifact_output_path', 'artifact_role_mismatch', 'asset_deadline',
+    'asset_hash', 'asset_pin', 'asset_redirect',
+    'asset_size', 'asset_transport', 'build_policy_drift',
+    'cargo_build_not_passed', 'cargo_json_bound', 'cargo_json_invalid',
+    'cargo_metadata_invalid', 'ciphertext_history_review_mismatch', 'cleanup_identity',
+    'cli_cleanup_unknown', 'command_deadline', 'command_failed',
+    'command_output_bound', 'compiler_failed_or_unknown', 'compiler_identity_mismatch',
+    'compiler_verbose_mismatch', 'container_cleanup_unknown', 'container_command_failed',
+    'container_contract', 'container_id', 'container_identity',
+    'cpu_affinity', 'deadline_or_signal', 'disk_floor',
+    'docker_endpoint', 'duplicate_json_key', 'encrypted_artifact_refused',
+    'encrypted_checkout_dirty', 'evidence_reserve_exhausted', 'evidence_source_changed',
+    'fixed_sdk_source_root', 'foreign_container_present', 'helper_missing',
+    'image_environment', 'input_changed', 'invalid_compiler',
+    'invalid_digest', 'json_bound', 'key_disposition_unknown',
+    'key_env_in_build', 'manual_own_repository_required', 'memory_pressure',
+    'moonlight_artifact_missing', 'mount_path', 'native_link_closure_requires_review',
+    'native_linux_arm_required', 'nonreaping_primitive_required', 'operation_identity',
+    'optimization_policy_drift', 'owned_session', 'owner_receipt',
+    'plaintext_review_required', 'plaintext_source_refused', 'prep_tool_identity',
+    'prep_tool_pins', 'prepare_deadline', 'prepare_failed_or_unknown',
+    'prepared_context_drift', 'private_case_required', 'private_receipt_required',
+    'private_source_input', 'producer_deadline', 'public_compiler_reference',
+    'registry_alias_refused', 'registry_credentials_refused', 'regular_file_required',
+    'release_asset_identity', 'resource_floor', 'response_deadline',
+    'sdk_key_identity', 'sealed_source_format', 'sealed_source_size',
+    'separate_sdk_key_required', 'signal_or_deadline', 'source_authorization',
+    'source_bound', 'source_catalog_identity', 'source_catalog_pin',
+    'source_catalog_schema', 'source_catalog_tuple', 'source_catalog_unapproved',
+    'source_changed_during_compile', 'source_contract_hash', 'source_directory_refused',
+    'source_empty', 'source_inventory_drift', 'source_root',
+    'source_still_encrypted', 'toolchain_drift', 'toolchain_image_identity',
+})
+FAILURE_STAGES = frozenset({
+    "admission", "prepare", "compile_context", "compile_setup",
+    "compile_resource_admission", "compile_source", "compile_image",
+    "compile_toolchain", "compile_prefetch", "compile_registry", "compile_cargo",
+    "compile_metadata", "compile_artifacts", "compile_cleanup", "compile_receipts",
+    "response", "internal_error",
+})
+
+
+def refusal_code(error):
+    if (isinstance(error, ValueError) and type(error.args) is tuple
+            and len(error.args) == 1 and type(error.args[0]) is str
+            and error.args[0] in PUBLIC_REFUSAL_CODES):
+        return error.args[0]
+    return "internal_error"
+
+
+def failure_stage(diagnostic, stage):
+    if diagnostic is not None:
+        diagnostic["failure_stage"] = stage if stage in FAILURE_STAGES else "internal_error"
+
+
+def public_failure(error, diagnostic):
+    return {"failure_stage": diagnostic["failure_stage"], "refusal_code": refusal_code(error),
+            "owner_close_called": diagnostic["owner_close_called"],
+            "owner_close_succeeded": diagnostic["owner_close_succeeded"],
+            "cleanup_refusal_code": diagnostic["cleanup_refusal_code"]}
+
+
 def canonical(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
 
@@ -555,7 +623,7 @@ for target in (fields["host"],"wasm32-unknown-unknown"):
         data=path.read_bytes();total+=len(data);assert total<=2*1024**3
         items.append({"path":str(path.relative_to(root)),"bytes":len(data),"sha256":hashlib.sha256(data).hexdigest()})
 assert items
-encoded=json.dumps(items,sort_keys=True,separators=(",",":")).encode()
+encoded=(json.dumps(items,sort_keys=True,separators=(",",":"))+"\n").encode()
 print(json.dumps({"release":fields["release"],"commit_hash":fields["commit-hash"],
 "commit_date":fields["commit-date"],"host":fields["host"],"llvm_version":fields["LLVM version"],
 "verbose_version":verbose,"executable_sha256":hashlib.sha256(actual.read_bytes()).hexdigest(),
@@ -589,37 +657,45 @@ def evidence_modules():
     return sealing, selection, pins
 
 
-def compile(case, row, operation, verify):
+def compile(case, row, operation, verify, diagnostic=None):
+    failure_stage(diagnostic, "compile_context")
     context = prepared(case, row, operation, verify)
     sealing, selection, evidence_pins = evidence_modules()
     sealing.recipient()  # Protected tuple admitted before any SDK compiler work.
+    failure_stage(diagnostic, "compile_setup")
     evidence = case / "build-private"; evidence.mkdir(mode=0o700, exist_ok=False)
     owner = verify.Owner(evidence, started=context["started_monotonic"])
-    source, registry, output = case / "frozen-sdk", case / "public-registry", case / "compiler-output"
-    registry.mkdir(mode=0o777, exist_ok=False); output.mkdir(mode=0o777, exist_ok=False)
-    registry.chmod(0o777); output.chmod(0o777)
-    source_before = tree_inventory(source)
     candidate, primary = None, "failed"
-    clean = False
+    clean, primary_error = False, None
     try:
+        source, registry, output = case / "frozen-sdk", case / "public-registry", case / "compiler-output"
+        registry.mkdir(mode=0o777, exist_ok=False); output.mkdir(mode=0o777, exist_ok=False)
+        registry.chmod(0o777); output.chmod(0o777)
+        source_before = tree_inventory(source)
+        failure_stage(diagnostic, "compile_resource_admission")
         verify.linux_resources(); require(shutil.disk_usage(case).free >= 10 * 1024**3, "disk_floor")
+        failure_stage(diagnostic, "compile_source")
         require(digest(canonical(source_before)) == row["input_inventory_sha256"], "source_inventory_drift")
         source_contract(source, row)
         require(not owner.docker(["ps", "--all", "--quiet"]).strip(), "foreign_container_present")
+        failure_stage(diagnostic, "compile_image")
         owner.docker(["image", "pull", row["compiler_ref"]], min(120, owner.remaining(120)))
         image = json.loads(owner.docker(["image", "inspect", row["compiler_ref"]]))[0]
         require(image["Id"] == row["compiler_image"] and image["Architecture"] == "arm64" and image["Os"] == "linux"
                 and row["compiler_ref"] in image.get("RepoDigests", [])
                 and image["Config"].get("Env", []) == row["image_environment"]
                 and not image["Config"].get("Volumes"), "toolchain_image_identity")
+        failure_stage(diagnostic, "compile_toolchain")
         probe, args = container(owner, row, operation, "toolchain", source, registry, output)
         compiler_identity = json.loads(start(owner, probe, args, ["python3", "-I", "-B", "-c", TOOLCHAIN_PROBE],
                                             min(60, owner.remaining(60))))
         _, exporter = helpers()
         exporter.compiler(compiler_identity, RUST, HOST)
+        failure_stage(diagnostic, "compile_prefetch")
         prefetch, args = container(owner, row, operation, "prefetch", source, registry, output)
         start(owner, prefetch, args, ["cargo", "+" + RUST, "fetch", "--locked", "--manifest-path", "examples/game/Cargo.toml"],
               min(300, owner.remaining(300)))
+        failure_stage(diagnostic, "compile_registry")
         require(not any((registry / name).exists() for name in ("credentials", "credentials.toml", "auth.json",
                         ".docker", ".codex", ".cursor", ".claude")), "registry_credentials_refused")
         # Cargo may update sqlite/lock bookkeeping even offline. Preserve the
@@ -630,6 +706,7 @@ def compile(case, row, operation, verify):
         shutil.copytree(registry, runtime_registry, symlinks=False)
         runtime_registry.chmod(0o777)
         for path in runtime_registry.rglob("*"): path.chmod(0o777 if path.is_dir() else 0o666)
+        failure_stage(diagnostic, "compile_cargo")
         compiler, args = container(owner, row, operation, "compile", source, runtime_registry, output)
         # The runtime copy is writable public cache, never the host's CARGO_HOME.
         mount_index = next(i + 1 for i, item in enumerate(args) if item == "--mount" and "dst=/registry" in args[i + 1])
@@ -642,6 +719,7 @@ def compile(case, row, operation, verify):
             min(3600, compile_remaining))
         events = cargo_events(raw)
         # Metadata is read only, offline, in the same source/toolchain boundary.
+        failure_stage(diagnostic, "compile_metadata")
         meta, args = container(owner, row, operation, "metadata", source, runtime_registry, output)
         mount_index = next(i + 1 for i, item in enumerate(args) if item == "--mount" and "dst=/registry" in args[i + 1])
         args[mount_index] = args[mount_index].removesuffix(",readonly")
@@ -649,12 +727,34 @@ def compile(case, row, operation, verify):
             "--format-version", "1", "--manifest-path", "examples/game/Cargo.toml", "--filter-platform", TARGET,
             "--features", "web-webgl2"],
             min(60, owner.remaining(60))))
+        failure_stage(diagnostic, "compile_artifacts")
         candidate = artifact_candidate(events, metadata)
         require(tree_inventory(source) == source_before, "source_changed_during_compile")
         primary = "built_not_qualified"
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        clean = owner.close()
+        if diagnostic is not None:
+            diagnostic["owner_close_called"] = True
+            diagnostic["owner_close_succeeded"] = False
+        try:
+            clean = owner.close()
+        except Exception as cleanup_error:
+            if diagnostic is not None:
+                diagnostic["cleanup_refusal_code"] = refusal_code(cleanup_error)
+            # Cleanup may fail, but must not replace an earlier command failure.
+            if primary_error is None:
+                failure_stage(diagnostic, "compile_cleanup")
+                raise
+        else:
+            if diagnostic is not None:
+                diagnostic["owner_close_succeeded"] = clean is True
+                if clean is not True:
+                    diagnostic["cleanup_refusal_code"] = "compiler_failed_or_unknown"
+    failure_stage(diagnostic, "compile_cleanup")
     require(clean and primary == "built_not_qualified", "compiler_failed_or_unknown")
+    failure_stage(diagnostic, "compile_receipts")
     require(verify.STOP is None and time.monotonic() < owner.hard, "producer_deadline")
     require(sealing.snapshot() == evidence_pins, "evidence_source_changed")
     closure = selection.owner_closure_projection(owner, operation, evidence_pins)
@@ -693,6 +793,9 @@ def main(argv=None):
     parser.add_argument("--phase", choices=("admit", "prepare", "compile"), required=True)
     parser.add_argument("--case", type=Path)
     args = parser.parse_args(argv)
+    # Close facts are tracked by compile; prepare has a separate, untracked owner.
+    diagnostic = {"failure_stage": "admission", "owner_close_called": None,
+                  "owner_close_succeeded": None, "cleanup_refusal_code": None}
     try:
         row, operation = approval(os.environ)
         if args.phase == "admit":
@@ -701,6 +804,7 @@ def main(argv=None):
         require(args.case is not None and args.case.is_absolute() and not args.case.is_symlink(), "private_case_required")
         verify, _ = helpers()
         verify.STOP = None
+        failure_stage(diagnostic, "prepare" if args.phase == "prepare" else "compile_context")
         started = time.monotonic() if args.phase == "prepare" else prepared(args.case, row, operation, verify)["started_monotonic"]
         hard = started + 3900
         def stop(number, _frame):
@@ -712,7 +816,8 @@ def main(argv=None):
                 prepare(args.case, row, operation, verify, started)
                 state = "prepared_private_source"
             else:
-                state = compile(args.case, row, operation, verify)
+                state = compile(args.case, row, operation, verify, diagnostic)
+            failure_stage(diagnostic, "response")
             require(verify.STOP is None and time.monotonic() < hard, "signal_or_deadline")
             print(json.dumps({"schema_version": 1, "state": state, "runtime_qualified": False,
                               "exported": False, "public_sdk_approved": False}), flush=True)
@@ -721,10 +826,12 @@ def main(argv=None):
             signal.setitimer(signal.ITIMER_REAL, 0)
             for number, handler in old.items(): signal.signal(number, handler)
         return 0 if verify.STOP is None and time.monotonic() < hard else 78
-    except Exception:
-        # No raw exception, Cargo diagnostic, private path, key or source data.
+    except Exception as error:
+        # Only fixed stage/code and actual close facts: no raw exception, Cargo
+        # diagnostic, private path, key or source data enters public output.
         print(json.dumps({"schema_version": 1, "state": "refused_or_failed", "runtime_qualified": False,
-                          "exported": False, "error_code": "trusted_sdk_producer_refused"}))
+                          "exported": False, "error_code": "trusted_sdk_producer_refused",
+                          **public_failure(error, diagnostic)}))
         return 78
 
 

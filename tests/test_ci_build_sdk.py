@@ -3,7 +3,10 @@
 Cargo JSON below is a modeled fixture. The finite child test proves only the
 public owner command boundary on Linux; it is not a physical SDK build.
 """
+import ast
+import contextlib
 import copy
+import io
 import hashlib
 import importlib.util
 import json
@@ -11,6 +14,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 import uuid
@@ -163,6 +167,160 @@ class ProducerTest(unittest.TestCase):
             self.assertTrue(owner.close())
         self.assertTrue(owner.children)
         self.assertTrue(all(row["reaped"] and row["group_closed"] and row["returncode"] == 0 for row in owner.children))
+
+
+    def _compile_failure(self, phase, error=None, *, cleanup=True, setup_collision=False):
+        # Execute main -> compile -> real container argument construction, with
+        # command transport/lifecycle modeled. This does not run Docker or an SDK.
+        case = self.root / uuid.uuid4().hex; case.mkdir()
+        source = case / "frozen-sdk"; source.mkdir(); (source / "Cargo.toml").write_text("[workspace]\n")
+        row = {**self.row, "input_inventory_sha256": build.digest(build.canonical(build.tree_inventory(source)))}
+        if setup_collision: (case / "public-registry").mkdir()
+        owners, commands = [], []
+        class Owner:
+            def __init__(self, evidence, started):
+                self.hard = started + 3900; self.containers = []; self.close_calls = 0; owners.append(self)
+            def journal(self): pass
+            def remaining(self, maximum): return maximum
+            def docker(self, argv, maximum=None):
+                if argv[:2] == ["image", "inspect"]:
+                    return json.dumps([{"Id": row["compiler_image"], "Architecture": "arm64", "Os": "linux",
+                        "RepoDigests": [row["compiler_ref"]], "Config": {"Env": row["image_environment"]}}]).encode()
+                return b""
+            def close(self):
+                self.close_calls += 1
+                if isinstance(cleanup, BaseException): raise cleanup
+                return cleanup
+        verify = types.SimpleNamespace(STOP=None, Owner=Owner, linux_resources=lambda: None)
+        exporter = types.SimpleNamespace(compiler=lambda *args: None)
+        sealing = types.SimpleNamespace(recipient=lambda: None)
+        def start(owner, owned, args, command, maximum):
+            commands.append((owned["phase"], command))
+            if owned["phase"] == phase: raise error if error is not None else build.Refused("command_failed")
+            return b'{}' if owned["phase"] == "toolchain" else b""
+        stdout = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=True), \
+             patch.object(build, "APPROVED_SOURCES", {"fixture": row}), \
+             patch.object(build, "helpers", return_value=(verify, exporter)), \
+             patch.object(build, "prepared", return_value={"started_monotonic": build.time.monotonic()}), \
+             patch.object(build, "evidence_modules", return_value=(sealing, None, {})), \
+             patch.object(build, "source_contract"), patch.object(build, "start", side_effect=start), \
+             patch.object(build.shutil, "disk_usage", return_value=types.SimpleNamespace(free=20 * 1024**3)), \
+             contextlib.redirect_stdout(stdout):
+            exit_code = build.main(["--phase", "compile", "--case", str(case)])
+        value = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 78)
+        self.assertEqual(value["state"], "refused_or_failed")
+        self.assertEqual(value["error_code"], "trusted_sdk_producer_refused")
+        self.assertFalse(value["runtime_qualified"])
+        self.assertFalse(value["exported"])
+        self.assertEqual(owners[0].close_calls, 1)
+        self.assertTrue(value["owner_close_called"])
+        return value, commands, stdout.getvalue()
+
+    def test_compile_command_failures_report_exact_stage_and_close_owner(self):
+        for phase, stage, prefix in (("toolchain", "compile_toolchain", ["python3", "-I", "-B", "-c"]),
+                                    ("prefetch", "compile_prefetch", ["cargo", "+1.98.1", "fetch"]),
+                                    ("compile", "compile_cargo", ["cargo", "+1.98.1", "build"])):
+            with self.subTest(phase=phase):
+                value, commands, _ = self._compile_failure(phase)
+                self.assertEqual(value["failure_stage"], stage)
+                self.assertEqual(value["refusal_code"], "command_failed")
+                self.assertTrue(value["owner_close_succeeded"])
+                self.assertIsNone(value["cleanup_refusal_code"])
+                self.assertEqual(commands[-1][0], phase)
+                self.assertEqual(commands[-1][1][:len(prefix)], prefix)
+
+    def test_cleanup_failure_preserves_original_command_failure_and_stage(self):
+        sentinel = "PRIVATE_KEY_PAYLOAD_DO_NOT_EMIT"
+        for cleanup, code in ((False, "compiler_failed_or_unknown"), (ValueError(sentinel), "internal_error")):
+            with self.subTest(code=code):
+                value, _, output = self._compile_failure("compile", cleanup=cleanup)
+                self.assertEqual(value["failure_stage"], "compile_cargo")
+                self.assertEqual(value["refusal_code"], "command_failed")
+                self.assertFalse(value["owner_close_succeeded"])
+                self.assertEqual(value["cleanup_refusal_code"], code)
+                self.assertNotIn(sentinel, output)
+
+    def test_unknown_exception_payloads_never_enter_public_failure(self):
+        sentinel = "PRIVATE_KEY_PAYLOAD_DO_NOT_EMIT"
+        for error in (ValueError(sentinel), build.Refused("command_failed\n" + sentinel),
+                      ValueError("command_failed", sentinel), OSError(sentinel)):
+            with self.subTest(error_type=type(error).__name__):
+                value, _, output = self._compile_failure("compile", error)
+                self.assertEqual(value["failure_stage"], "compile_cargo")
+                self.assertEqual(value["refusal_code"], "internal_error")
+                self.assertTrue(value["owner_close_succeeded"])
+                self.assertNotIn(sentinel, output)
+        self.assertEqual(build.refusal_code(ValueError("compiler_identity_mismatch")), "compiler_identity_mismatch")
+        self.assertEqual(build.refusal_code(ValueError("new_unreviewed_refusal")), "internal_error")
+
+    def test_setup_failure_after_owner_creation_still_closes_owner(self):
+        value, commands, _ = self._compile_failure("compile", setup_collision=True)
+        self.assertEqual(value["failure_stage"], "compile_setup")
+        self.assertEqual(value["refusal_code"], "internal_error")
+        self.assertTrue(value["owner_close_succeeded"])
+        self.assertEqual(commands, [])
+
+    def test_prepare_failure_after_modeled_close_has_unknown_compile_close_facts(self):
+        # Prepare has its own owner. Main must not report compile-close facts as
+        # false when that untracked owner already closed before prepare failed.
+        closed = []
+        class PrepareOwner:
+            def close(self): closed.append(True); return True
+        owner = PrepareOwner()
+        verify = types.SimpleNamespace(STOP=None)
+        def prepare(*args):
+            self.assertTrue(owner.close())
+            raise build.Refused("prepare_failed_or_unknown")
+        stdout = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=True), \
+             patch.object(build, "APPROVED_SOURCES", {"fixture": self.row}), \
+             patch.object(build, "helpers", return_value=(verify, None)), \
+             patch.object(build, "prepare", side_effect=prepare), contextlib.redirect_stdout(stdout):
+            exit_code = build.main(["--phase", "prepare", "--case", str(self.root / "prepare-case")])
+        value = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 78)
+        self.assertEqual(closed, [True])
+        self.assertEqual(value["failure_stage"], "prepare")
+        self.assertEqual(value["refusal_code"], "prepare_failed_or_unknown")
+        self.assertIsNone(value["owner_close_called"])
+        self.assertIsNone(value["owner_close_succeeded"])
+        self.assertIsNone(value["cleanup_refusal_code"])
+
+    def test_actual_probe_scripts_join_the_same_public_toy_sysroot_inventory(self):
+        # Execute both maintained embedded scripts with public toy files and
+        # mocked command transport. No rustc, SDK, Docker or external child runs.
+        compiler = self.root / "toy-rustc"; compiler.write_bytes(b"public-toy-not-a-compiler")
+        root = self.root / "toy-sysroot"
+        for target in (build.HOST, build.TARGET):
+            directory = root / "lib/rustlib" / target / "lib"; directory.mkdir(parents=True)
+            (directory / "libtoy.rlib").write_bytes(("public-toy-" + target).encode())
+        verbose = "rustc 1.98.1 (1111111 2026-01-01)\nbinary: rustc\ncommit-hash: " + "1" * 40 + \
+            "\ncommit-date: 2026-01-01\nhost: " + build.HOST + "\nrelease: 1.98.1\nLLVM version: 21.1.1\n"
+        def command(argv, **options):
+            self.assertEqual(options, {"check": True, "capture_output": True, "text": True, "timeout": 5})
+            values = {("rustup", "which", "--toolchain", "1.98.1", "rustc"): str(compiler),
+                (str(compiler), "-vV"): verbose, (str(compiler), "--print", "sysroot"): str(root),
+                ("dpkg-query", "-W", "-f", "${Package}\t${Version}\n", "python3", "ca-certificates", "libc6"):
+                    "python3\t3.11.2\nca-certificates\t20230311\nlibc6\t2.36\n",
+                ("cargo", "+1.98.1", "--version"): "cargo 1.98.1", ("rustup", "--version"): "rustup 1.28.2",
+                ("python3", "--version"): "Python 3.11.2"}
+            self.assertIn(tuple(argv), values)
+            return types.SimpleNamespace(stdout=values[tuple(argv)])
+        guest_tree = ast.parse((ROOT / "tools/probe_toolchain.py").read_text())
+        guest = next(node.value.value for node in guest_tree.body if isinstance(node, ast.Assign)
+                     and any(isinstance(name, ast.Name) and name.id == "GUEST" for name in node.targets))
+        observed = []
+        for script in (build.TOOLCHAIN_PROBE, guest):
+            stdout = io.StringIO()
+            with patch("subprocess.run", side_effect=command), contextlib.redirect_stdout(stdout):
+                exec(compile(script, "public-toy-probe", "exec"), {})
+            observed.append(json.loads(stdout.getvalue()))
+        self.assertEqual(observed[0]["sysroot_sha256"], observed[1]["sysroot_sha256"])
+        self.assertEqual(observed[0]["executable_sha256"], observed[1]["executable_sha256"])
+        self.assertEqual(observed[1]["sysroot_files"], {build.HOST: 1, build.TARGET: 1})
+
 
 
 if __name__ == "__main__": unittest.main()
