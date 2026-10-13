@@ -15,6 +15,7 @@ import re
 import shutil
 import signal
 import stat
+import subprocess
 import tarfile
 import time
 import urllib.parse
@@ -34,6 +35,329 @@ MAX_FILE, MAX_TOTAL, MAX_JSON, MAX_TAR, MAX_CIPHER = 64 << 20, 512 << 20, 2 << 2
 ARCHIVE_NAMES = {"age", "age/age-keygen", "age/age-plugin-tag", "age/age-plugin-batchpass", "age/age-plugin-pq",
                  "age/age-plugin-tagpq", "age/age", "age/LICENSE", "age/age-inspect"}
 STOP = None
+
+
+# Frozen codes from the named public sealer, selection, producer, owner, and
+# compiler-identity validators. Runtime dependencies cannot extend this list.
+PUBLIC_REFUSAL_CODES = frozenset({
+    'absolute_path_required',
+    'age_binary_missing',
+    'age_binary_pin',
+    'age_release_bound',
+    'age_release_inventory',
+    'age_release_member',
+    'age_release_pin',
+    'age_release_redirect',
+    'age_release_status',
+    'age_version',
+    'archive_inventory',
+    'archive_path',
+    'artifact_bijection',
+    'artifact_changed',
+    'artifact_collision',
+    'artifact_count',
+    'artifact_directory_alias',
+    'artifact_format_magic',
+    'artifact_identity',
+    'artifact_identity_changed',
+    'artifact_inventory',
+    'artifact_metadata_invalid',
+    'artifact_metadata_mismatch',
+    'artifact_output_path',
+    'artifact_path',
+    'artifact_pin_changed',
+    'artifact_role',
+    'artifact_role_mismatch',
+    'artifact_root_changed',
+    'artifact_total_bound',
+    'asset_deadline',
+    'asset_hash',
+    'asset_pin',
+    'asset_redirect',
+    'asset_size',
+    'asset_transport',
+    'browser_blank',
+    'browser_boot_refused',
+    'browser_cleanup_or_web_drift',
+    'browser_cli_cleanup',
+    'browser_deadline',
+    'browser_eof',
+    'browser_output_bound',
+    'browser_png',
+    'browser_png_filter',
+    'browser_png_shape',
+    'browser_png_size',
+    'browser_protocol_bound',
+    'browser_runtime_error',
+    'build_policy_drift',
+    'bundle_guard_refused',
+    'cargo_build_not_passed',
+    'cargo_contract_mismatch',
+    'cargo_dependency_count',
+    'cargo_dependency_kind',
+    'cargo_dependency_kinds',
+    'cargo_dependency_reference',
+    'cargo_features',
+    'cargo_graph_shape',
+    'cargo_inventory_mismatch',
+    'cargo_json_bound',
+    'cargo_json_invalid',
+    'cargo_metadata_invalid',
+    'cargo_node_count',
+    'cargo_node_identity',
+    'cargo_package_count',
+    'cargo_package_duplicate',
+    'cargo_receipt_mismatch',
+    'cargo_root',
+    'cargo_targets',
+    'case_required',
+    'catalog_asset_set',
+    'catalog_repository',
+    'catalog_tuple',
+    'catalog_unapproved',
+    'cipher_copy_changed',
+    'cipher_format',
+    'ciphertext_history_review_mismatch',
+    'cleanup_identity',
+    'cli_cleanup_unknown',
+    'cli_not_closed',
+    'command_deadline',
+    'command_failed',
+    'command_output_bound',
+    'compile_closure_join',
+    'compile_closure_shape',
+    'compile_inventory_join',
+    'compile_not_closed',
+    'compile_not_successful',
+    'compile_original_deadline',
+    'compile_receipt_join',
+    'compiler_contract',
+    'compiler_failed_or_unknown',
+    'compiler_identity_mismatch',
+    'compiler_not_closed',
+    'compiler_receipt',
+    'compiler_target_drift',
+    'compiler_verbose_mismatch',
+    'container_caps',
+    'container_cleanup_unknown',
+    'container_command_failed',
+    'container_contract',
+    'container_filesystem_caps',
+    'container_id',
+    'container_identity',
+    'container_mounts',
+    'container_not_closed',
+    'container_phase_set',
+    'copy_bound',
+    'copy_hash',
+    'copy_identity',
+    'copy_path',
+    'cpu_affinity',
+    'deadline_or_signal',
+    'disk_floor',
+    'docker_endpoint',
+    'duplicate_json_key',
+    'encrypted_artifact_refused',
+    'encrypted_checkout_dirty',
+    'encrypted_source_refused',
+    'evidence_deadline',
+    'evidence_recipient_contract',
+    'evidence_recipient_unapproved',
+    'evidence_reserve_exhausted',
+    'evidence_root',
+    'evidence_source_changed',
+    'extract_directory',
+    'extract_hash',
+    'extract_size',
+    'final_cleanup_unknown',
+    'fixed_sdk_source_root',
+    'foreign_container_present',
+    'fresh_tool_root',
+    'guard_refused',
+    'guard_unavailable',
+    'helper_missing',
+    'image_contract',
+    'image_environment',
+    'image_identity',
+    'image_inventory',
+    'image_pin',
+    'image_registry_pin',
+    'image_source_policy',
+    'input_changed',
+    'input_digest_mismatch',
+    'input_identity',
+    'interrupted',
+    'invalid_artifact_root',
+    'invalid_authorization',
+    'invalid_compiler',
+    'invalid_crate',
+    'invalid_crate_files',
+    'invalid_crates',
+    'invalid_dependencies',
+    'invalid_digest',
+    'invalid_features',
+    'invalid_input_file',
+    'invalid_inventory',
+    'invalid_inventory_row',
+    'invalid_output',
+    'invalid_path',
+    'invalid_producer',
+    'invalid_profile',
+    'invalid_role',
+    'invalid_roots',
+    'invalid_sdk_manifest',
+    'invalid_source_identity',
+    'inventory_bound',
+    'inventory_too_large',
+    'json_bound',
+    'key_disposition_unknown',
+    'key_env_in_build',
+    'manual_own_repository_required',
+    'memory_pressure',
+    'metadata_bound',
+    'metadata_list',
+    'metadata_string',
+    'missing_linkable_crate',
+    'moonlight_artifact_missing',
+    'mount_identity',
+    'mount_path',
+    'native_link_closure_requires_review',
+    'native_linux_arm_required',
+    'nonreaping_primitive_required',
+    'open_dependency_graph',
+    'operation_identity',
+    'optimization_policy_drift',
+    'output_changed',
+    'output_inside_input',
+    'owned_session',
+    'owner_journal_or_count',
+    'owner_receipt',
+    'payload_total_bound',
+    'plaintext_changed',
+    'plaintext_review_required',
+    'plaintext_source_refused',
+    'prep_tool_identity',
+    'prep_tool_pins',
+    'prepare_deadline',
+    'prepare_failed_or_unknown',
+    'prepared_context_drift',
+    'private_case_required',
+    'private_json_mode',
+    'private_metadata_inventory',
+    'private_receipt_required',
+    'private_record_inventory',
+    'private_source_input',
+    'producer_deadline',
+    'producer_digest_mismatch',
+    'project_authority',
+    'provenance_inventory_mismatch',
+    'public_browser_fields',
+    'public_compiler_reference',
+    'public_copy_drift',
+    'public_destination_exists',
+    'public_file_fields',
+    'public_inventory',
+    'public_receipt_fields',
+    'public_receipt_hash',
+    'public_receipt_shape',
+    'public_receipt_state',
+    'public_run_identity',
+    'publication_deadline',
+    'receipt_changed',
+    'receipt_context_drift',
+    'registry_alias_refused',
+    'registry_copy_failed',
+    'registry_credentials_refused',
+    'registry_entry_missing',
+    'registry_entry_type',
+    'registry_io_failure',
+    'registry_no_space',
+    'registry_os_error',
+    'registry_permission_denied',
+    'registry_prefetch_command',
+    'registry_prefetch_deadline',
+    'registry_quota_exceeded',
+    'registry_read_only',
+    'regular_file_required',
+    'release_asset_identity',
+    'repository_identity',
+    'resource_floor',
+    'response_deadline',
+    'run_identity',
+    'sdk_inventory_mismatch',
+    'sdk_key_identity',
+    'sdk_profile',
+    'seal_cli_unknown',
+    'sealed_source_format',
+    'sealed_source_size',
+    'self_referential_manifest',
+    'separate_sdk_key_required',
+    'signal_or_deadline',
+    'source_authorization',
+    'source_bound',
+    'source_catalog_identity',
+    'source_catalog_pin',
+    'source_catalog_schema',
+    'source_catalog_tuple',
+    'source_catalog_unapproved',
+    'source_changed_during_compile',
+    'source_contract_hash',
+    'source_directory_refused',
+    'source_empty',
+    'source_inventory_drift',
+    'source_or_cleanup_unknown',
+    'source_pin_changed',
+    'source_pins',
+    'source_root',
+    'source_still_encrypted',
+    'symlink_path_refused',
+    'target_mismatch',
+    'tool_inventory',
+    'tool_root',
+    'tool_root_required',
+    'toolchain_drift',
+    'toolchain_image_identity',
+    'unaccepted_cargo_receipt',
+    'unbound_artifact',
+    'unreachable_crate',
+    'unreviewed_sdk_manifest',
+    'web_drift',
+    'web_entry',
+    'web_guard_inventory',
+    'web_identity',
+    'web_inventory',
+    'web_link',
+    'web_missing',
+    'web_size',
+})
+FAILURE_STAGES = frozenset(('admission', 'helpers', 'resource_admission', 'case_context', 'install_tool', 'owner_setup', 'tool_pin', 'tool_version', 'payload', 'archive', 'encrypt', 'owner_cleanup', 'postseal_integrity', 'delivery', 'receipt', 'final_validation', 'response', 'final_cleanup', 'terminal_deadline', 'internal_error'))
+
+
+def refusal_code(error):
+    if (isinstance(error, ValueError) and type(error.args) is tuple
+            and len(error.args) == 1 and type(error.args[0]) is str
+            and error.args[0] in PUBLIC_REFUSAL_CODES):
+        return error.args[0]
+    return "internal_error"
+
+
+def exception_category(error, producer=None, verify=None):
+    kind = type(error)
+    if kind is json.JSONDecodeError: return "json_error"
+    if kind in (TimeoutError, subprocess.TimeoutExpired): return "timeout"
+    if kind is KeyError: return "key_error"
+    if kind is TypeError: return "type_error"
+    if kind in (OSError, PermissionError, FileNotFoundError, FileExistsError,
+                IsADirectoryError, NotADirectoryError, InterruptedError,
+                BlockingIOError, ChildProcessError, ConnectionError,
+                BrokenPipeError, ConnectionAbortedError, ConnectionRefusedError,
+                ConnectionResetError, ProcessLookupError):
+        return "os_error"
+    # Only these exact classes from already source-pinned public modules count.
+    value_types = (ValueError, getattr(producer, "Refused", None),
+                   getattr(verify, "Refused", None), getattr(verify, "ResourceRefused", None))
+    if kind in value_types: return "value_error"
+    return "unexpected"
 
 
 def require(value, code):
@@ -252,6 +576,20 @@ def main(argv=None):
     parser.add_argument("--phase", required=True, choices=("admit", "install", "seal"))
     parser.add_argument("--case", type=Path); parser.add_argument("--tool-root", type=Path)
     args = parser.parse_args(argv); owner = None; verify = None; result = 1; primary = None
+    producer = None; stage = "admission"
+    # Facts concern this sealer's Owner only; None is unobserved, booleans describe the latest close attempt.
+    diagnostic = {"failure_stage": "admission", "refusal_code": None, "exception_category": None,
+                  "owner_close_called": None, "owner_close_succeeded": None, "cleanup_refusal_code": None}
+    def close_owner():
+        diagnostic["owner_close_called"] = True
+        diagnostic["owner_close_succeeded"] = False
+        value = owner.close()
+        diagnostic["owner_close_succeeded"] = value is True
+        return value
+    def late_failure(failure_stage, code, error=None):
+        if diagnostic["refusal_code"] is None:
+            diagnostic.update(failure_stage=failure_stage, refusal_code=code,
+                              exception_category=exception_category(error, producer, verify) if error is not None else None)
     public_created = False; plain = None; plain_identity = None; hard = None; scope = False; STOP = None
     def clock():
         require(STOP is None, "interrupted"); require(hard is not None and time.monotonic() < hard - 30, "evidence_deadline")
@@ -265,12 +603,15 @@ def main(argv=None):
         if args.phase == "admit":
             print(canonical({"schema_version": 1, "state": "evidence_tuple_admitted_not_qualified", "SDK_qualified": False}).decode(), end="")
             return 0
+        stage = "helpers"
         verify, _ = producer.helpers(); verify.STOP = None
+        stage = "resource_admission"
         verify.linux_resources()
         require(args.tool_root is not None, "tool_root_required")
         if args.phase == "install":
             started = time.monotonic(); hard = started + 120
         else:
+            stage = "case_context"
             require(args.case is not None and args.case.is_absolute() and args.case.resolve() == args.case, "case_required")
             context = producer.prepared(args.case, row, operation, verify)
             started = context["started_monotonic"]; hard = started + 3900
@@ -279,24 +620,35 @@ def main(argv=None):
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         signal.setitimer(signal.ITIMER_REAL, max(.001, hard - time.monotonic())); clock()
         if args.phase == "install":
+            stage = "install_tool"
             install(args.tool_root, approved, clock)
             evidence = args.tool_root.parent / ("age-install-evidence-" + uuid.uuid4().hex); evidence.mkdir(mode=0o700)
+            stage = "owner_setup"
             owner = verify.Owner(evidence, started=hard - 3900)
         else:
             evidence = args.case / "seal-private"; evidence.mkdir(mode=0o700)
+            stage = "owner_setup"
             owner = verify.Owner(evidence, started=started)
+        diagnostic["owner_close_called"] = False
+        stage = "tool_pin"
         binary = tool(args.tool_root, approved)
+        stage = "tool_version"
         observed = owner.command([str(binary), "--version"], 5).decode().strip()
         require(observed in (VERSION, "v" + VERSION), "age_version")
         if args.phase == "seal":
+            stage = "payload"
             clock(); require(shutil.disk_usage(args.case).free >= 10 * 1024**3, "disk_floor")
             bodies, inventory_sha, count, receipts, chosen, identities = payload(args.case, producer, verify, selection, context, row, operation, pins, clock)
+            stage = "archive"
             plain = evidence / "selected-evidence.tar"; plain_sha, plain_identity = archive_payload(plain, bodies, clock)
             del bodies
             cipher = evidence / "evidence.tar.age"
+            stage = "encrypt"
             owner.command([str(binary), "--encrypt", "--recipient", approved["recipient"], "--output", str(cipher), str(plain)],
                           min(60, owner.remaining(60)))
-            clock(); require(owner.close() and owner.children and all(r["reaped"] and r["group_closed"] for r in owner.children), "seal_cli_unknown")
+            stage = "owner_cleanup"
+            clock(); require(close_owner() and owner.children and all(r["reaped"] and r["group_closed"] for r in owner.children), "seal_cli_unknown")
+            stage = "postseal_integrity"
             tool(args.tool_root, approved); require(snapshot() == pins, "source_pin_changed")
             for name, wanted in (("artifact-candidate.private.json", receipts["candidate"]), ("cargo-closure.private.json", receipts["receipt"]),
                                  ("producer-closure.private.json", receipts["closed"])):
@@ -310,11 +662,13 @@ def main(argv=None):
             plain.unlink(); plain = None
             cipher_raw = regular(cipher, MAX_CIPHER)
             require(cipher_raw.startswith(b"age-encryption.org/v1\n") and len(cipher_raw) > 100, "cipher_format")
+            stage = "delivery"
             clock(); public = Path.cwd() / ".sdk-cipher-evidence"; public.mkdir(mode=0o700); public_created = True
             final = public / "evidence.tar.age"
             fd = os.open(final, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "wb") as stream: stream.write(cipher_raw); stream.flush(); os.fsync(stream.fileno())
             clock(); require(digest(regular(final, MAX_CIPHER)) == digest(cipher_raw), "cipher_copy_changed")
+            stage = "receipt"
             receipt = {"schema_version": 1, "state": "ENCRYPTED_PRIVATE_PRODUCER_EVIDENCE_DELIVERED_NOT_QUALIFIED",
                 "operation_id": operation, "source_revision": row["source_revision"], "cipher_bytes": len(cipher_raw), "cipher_sha256": digest(cipher_raw),
                 "recipient_sha256": digest(approved["recipient"].encode()), "age_binary_sha256": approved["age_binary_sha256"],
@@ -322,22 +676,36 @@ def main(argv=None):
                 "owned_compile_closed": True, "owned_seal_cli_closed": True, "sdk_qualified": False, "abi_qualified": False}
             verify.save(public / "cipher-receipt.json", receipt)
             require({p.name for p in public.iterdir()} == {"evidence.tar.age", "cipher-receipt.json"}, "public_inventory")
-        clock(); require(owner.close() and snapshot() == pins, "source_or_cleanup_unknown")
+        stage = "final_validation"
+        clock(); require(close_owner() and snapshot() == pins, "source_or_cleanup_unknown")
+        stage = "response"
         print(canonical({"schema_version": 1, "state": "public_age_installed" if args.phase == "install" else "encrypted_evidence_delivered_not_qualified", "SDK_qualified": False}).decode(), end="", flush=True)
         clock(); result = 0
-    except Exception:
+    except Exception as error:
         primary = "encrypted_evidence_refused_or_failed"
-        try: print(canonical({"schema_version": 1, "state": "failed", "code": primary, "SDK_qualified": False}).decode(), end="", flush=True)
-        except OSError: pass
+        diagnostic.update(failure_stage=stage if stage in FAILURE_STAGES else "internal_error",
+                          refusal_code=refusal_code(error), exception_category=exception_category(error, producer, verify))
     finally:
         if owner is not None:
             try:
-                if not owner.close(): result = 1
-            except Exception: result = 1
-        if STOP is not None or (hard is not None and time.monotonic() >= hard - 30): result = 1
+                if not close_owner():
+                    result = 1
+                    diagnostic["cleanup_refusal_code"] = "source_or_cleanup_unknown"
+                    late_failure("final_cleanup", "source_or_cleanup_unknown")
+            except Exception as error:
+                result = 1
+                diagnostic["cleanup_refusal_code"] = refusal_code(error)
+                late_failure("final_cleanup", refusal_code(error), error)
+        if STOP is not None or (hard is not None and time.monotonic() >= hard - 30):
+            result = 1
+            late_failure("terminal_deadline", "interrupted" if STOP is not None else "evidence_deadline")
         if result != 0 and public_created and verify is not None:
             try: verify.save(Path.cwd() / ".sdk-cipher-evidence/cipher-receipt.json", {"schema_version": 1, "state": "failed", "code": primary or "cleanup_or_deadline_unknown", "sdk_qualified": False})
             except Exception: pass
+        if diagnostic["refusal_code"] is not None:
+            try: print(canonical({"schema_version": 1, "state": "failed", "code": primary or "cleanup_or_deadline_unknown",
+                                  "SDK_qualified": False, **diagnostic}).decode(), end="", flush=True)
+            except OSError: pass
         if scope:
             signal.setitimer(signal.ITIMER_REAL, 0)
             for number in (signal.SIGTERM, signal.SIGINT, signal.SIGALRM): signal.signal(number, signal.SIG_DFL)

@@ -4,6 +4,9 @@ Actual age toy crypto and actual compiled closure are separate Root evidence.
 These tests never read private SDK source, generate identities or run Docker.
 """
 import copy
+import contextlib
+import io
+import time
 import importlib.util
 import json
 import os
@@ -218,6 +221,108 @@ class SelectionTest(unittest.TestCase):
             def expired(): raise ValueError("evidence_deadline")
             with self.assertRaisesRegex(ValueError, "evidence_deadline"):
                 seal.archive_payload(Path(d) / "late.tar", bodies, expired)
+
+
+class SealerDiagnosticTests(unittest.TestCase):
+    """Actual main/caller with modeled transport and owner; no SDK, age or Docker."""
+
+    def failure(self, error, *, where="payload", cleanup=True):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as temporary:
+            case = Path(temporary).resolve() / "case"; case.mkdir()
+            calls = []; start = time.monotonic()
+            class Owner:
+                def __init__(self, evidence, started): self.children = []; self.hard = started + 3900
+                def command(self, argv, maximum):
+                    calls.append(("command", maximum))
+                    if len([c for c in calls if c[0] == "command"]) == 2 and where == "encrypt": raise error
+                    return b"1.3.2\n"
+                def remaining(self, maximum): return maximum
+                def close(self):
+                    calls.append(("close", None))
+                    if isinstance(cleanup, Exception): raise cleanup
+                    return cleanup
+            verify = types.SimpleNamespace(STOP=None, Owner=Owner, linux_resources=lambda: None)
+            producer = types.SimpleNamespace(approval=lambda env: ({}, "toy-operation"), helpers=lambda: (verify, None),
+                prepared=lambda *args: {"started_monotonic": start})
+            def module(name, pins):
+                if name == "ci_build_sdk": return producer
+                if name == "evidence_selection": return selection
+                raise AssertionError("unexpected helper")
+            if where == "context": producer.prepared = lambda *args: (_ for _ in ()).throw(error)
+            def payload(*args):
+                if where == "payload": raise error
+                return {"metadata/toy.json": b"{}\n"}, "a" * 64, 1, {}, [], {}
+            output = io.StringIO()
+            with patch.object(seal, "snapshot", return_value={"toy": "a" * 64}), \
+                    patch.object(seal, "module", side_effect=module), \
+                    patch.object(seal, "recipient", return_value={"recipient": "age1-public-toy-only"}), \
+                    patch.object(seal, "tool", return_value=Path("/public/toy/age")), \
+                    patch.object(seal, "payload", side_effect=payload), \
+                    patch.object(seal.shutil, "disk_usage", return_value=types.SimpleNamespace(free=20 * 1024**3)), \
+                    patch.object(seal.signal, "signal"), patch.object(seal.signal, "setitimer"), \
+                    contextlib.redirect_stdout(output):
+                code = seal.main(["--phase", "seal", "--case", str(case), "--tool-root", str(case / "age")])
+            raw = output.getvalue(); value = json.loads(raw)
+            self.assertEqual(code, 1)
+            self.assertEqual(value["state"], "failed")
+            self.assertEqual(value["code"], "encrypted_evidence_refused_or_failed")
+            self.assertFalse(value["SDK_qualified"])
+            self.assertEqual(set(value), {"schema_version", "state", "code", "SDK_qualified", "failure_stage", "refusal_code",
+                                         "exception_category", "owner_close_called", "owner_close_succeeded", "cleanup_refusal_code"})
+            return value, calls, raw
+
+    def test_failure_before_owner_keeps_close_facts_unknown(self):
+        value, calls, _ = self.failure(ValueError("prepared_context_drift"), where="context")
+        self.assertEqual(value["failure_stage"], "case_context")
+        self.assertEqual(value["refusal_code"], "prepared_context_drift")
+        self.assertIsNone(value["owner_close_called"])
+        self.assertIsNone(value["owner_close_succeeded"])
+        self.assertEqual(calls, [])
+
+    def test_payload_fixed_refusal_reports_stage_and_actual_successful_close(self):
+        value, calls, _ = self.failure(ValueError("compile_closure_join"))
+        self.assertEqual(value["failure_stage"], "payload")
+        self.assertEqual(value["refusal_code"], "compile_closure_join")
+        self.assertEqual(value["exception_category"], "value_error")
+        self.assertTrue(value["owner_close_called"])
+        self.assertTrue(value["owner_close_succeeded"])
+        self.assertIsNone(value["cleanup_refusal_code"])
+        self.assertEqual(calls, [("command", 5), ("close", None)])
+
+    def test_primary_refusal_survives_cleanup_false_and_exception_without_details(self):
+        for cleanup, expected in ((False, "source_or_cleanup_unknown"), (ValueError("command_failed"), "command_failed"),
+                                  (PermissionError("PRIVATE_CLEANUP_DETAIL"), "internal_error")):
+            with self.subTest(expected=expected):
+                value, _, raw = self.failure(ValueError("compile_inventory_join"), cleanup=cleanup)
+                self.assertEqual(value["failure_stage"], "payload")
+                self.assertEqual(value["refusal_code"], "compile_inventory_join")
+                self.assertEqual(value["exception_category"], "value_error")
+                self.assertTrue(value["owner_close_called"])
+                self.assertFalse(value["owner_close_succeeded"])
+                self.assertEqual(value["cleanup_refusal_code"], expected)
+                self.assertNotIn("PRIVATE_CLEANUP_DETAIL", raw)
+
+    def test_unknown_value_and_os_errors_never_emit_private_payload(self):
+        errors = [(ValueError("PRIVATE_SOURCE_OR_TOKEN"), "value_error"), (ValueError(["PRIVATE_SOURCE_OR_TOKEN"]), "value_error"),
+                  (KeyError("PRIVATE_SOURCE_OR_TOKEN"), "key_error"), (TypeError("PRIVATE_SOURCE_OR_TOKEN"), "type_error"),
+                  (PermissionError("PRIVATE_SOURCE_OR_TOKEN"), "os_error"), (TimeoutError("PRIVATE_SOURCE_OR_TOKEN"), "timeout"),
+                  (json.JSONDecodeError("PRIVATE_SOURCE_OR_TOKEN", "PRIVATE_BODY", 0), "json_error"),
+                  (RuntimeError("PRIVATE_SOURCE_OR_TOKEN"), "unexpected")]
+        for error, category in errors:
+            with self.subTest(category=category):
+                value, _, raw = self.failure(error)
+                self.assertEqual(value["refusal_code"], "internal_error")
+                self.assertEqual(value["exception_category"], category)
+                self.assertNotIn("PRIVATE_SOURCE_OR_TOKEN", raw)
+                self.assertNotIn("PRIVATE_BODY", raw)
+
+    def test_encryption_command_failure_reports_exact_stage(self):
+        value, calls, _ = self.failure(ValueError("command_failed"), where="encrypt")
+        self.assertEqual(value["failure_stage"], "encrypt")
+        self.assertEqual(value["refusal_code"], "command_failed")
+        self.assertTrue(value["owner_close_called"])
+        self.assertTrue(value["owner_close_succeeded"])
+        self.assertEqual(calls, [("command", 5), ("command", 60), ("close", None)])
 
 
 if __name__ == "__main__": unittest.main()
