@@ -95,14 +95,16 @@ def exact_artifact_selection(candidate, cargo_receipt):
         require(not path.is_absolute() and len(path.parts) == 3 and path.parts[0] == "lib"
                 and path.parts[1] in (TARGET, HOST) and len(path.name) <= 100
                 and re.fullmatch(r"[A-Za-z0-9_+-][A-Za-z0-9._+-]*", path.name)
-                and not source.is_absolute() and len(source.parts) >= 3 and source.parts[0] == "target"
+                and not source.is_absolute() and len(source.parts) >= 3 and source.parts[0] in ("target", "build")
                 and all(p not in ("", ".", "..") for p in source.parts) and source.name == path.name,
                 "artifact_path")
         role = row["role"]
         require(role in ("opaque_rlib", "opaque_metadata", "opaque_proc_macro")
                 and path.suffix in {"opaque_rlib": {".rlib"}, "opaque_metadata": {".rmeta"},
                                     "opaque_proc_macro": {".so"}}[role]
-                and row["target"] == path.parts[1] and (role != "opaque_proc_macro" or row["target"] == HOST), "artifact_role")
+                and row["target"] == path.parts[1]
+                and row["target"] == (TARGET if source.is_relative_to(PurePosixPath(source.parts[0]) / TARGET) else HOST)
+                and (role != "opaque_proc_macro" or row["target"] == HOST), "artifact_role")
         require(str(path) in expected and str(path) not in seen and expected[str(path)]["role"] == role, "artifact_bijection")
         seen.add(str(path)); result.append({"path": str(path), "compiler_output": str(source), **expected[str(path)]})
     require(seen == set(expected), "artifact_bijection")

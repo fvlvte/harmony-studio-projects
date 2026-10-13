@@ -137,6 +137,67 @@ class ProducerTest(unittest.TestCase):
         with self.assertRaises(build.Refused):
             build.artifact_candidate(events + [{"reason": "build-script-executed", "linked_libs": ["static=unknown"]}], self.metadata)
 
+    def test_cargo_artifacts_preserve_both_fixed_output_roots_and_target_host_roles(self):
+        # Modeled Cargo events exercise the real selector; no compiled SDK claim.
+        for root in ("target", "build"):
+            with self.subTest(root=root):
+                target = copy.deepcopy(self.event)
+                target["filenames"] = [f"/out/{root}/{build.TARGET}/web-release/deps/libmoonlight-target.rlib",
+                                       f"/out/{root}/{build.TARGET}/web-release/deps/libmoonlight-target.rmeta"]
+                host = copy.deepcopy(self.event)
+                host["filenames"] = [f"/out/{root}/web-release/deps/libmoonlight-host.rlib"]
+                macro = copy.deepcopy(self.event)
+                macro["target"]["kind"] = ["proc-macro"]
+                macro["filenames"] = [f"/out/{root}/web-release/deps/libmoonlight-macro.so"]
+                rows = build.artifact_candidate([target, host, macro], self.metadata)
+                self.assertEqual([(row["target"], row["kind"], row["role"]) for row in rows],
+                                 [(build.TARGET, "target", "opaque_rlib"),
+                                  (build.TARGET, "target", "opaque_metadata"),
+                                  (build.HOST, "host_library", "opaque_rlib"),
+                                  (build.HOST, "host_proc_macro", "opaque_proc_macro")])
+                self.assertEqual([row["compiler_output"] for row in rows],
+                                 [name.removeprefix("/out/") for event in (target, host, macro)
+                                  for name in event["filenames"]])
+                self.assertEqual(rows[-1]["public_path"], f"lib/{build.HOST}/libmoonlight-macro.so")
+
+    def test_cargo_artifacts_refuse_lookalike_traversal_raw_source_and_cross_root_collision(self):
+        for name in ("/out/build-other/deps/libmoonlight.rlib", "/out/target-other/deps/libmoonlight.rlib",
+                     "/out/build/../target/deps/libmoonlight.rlib", "out/build/deps/libmoonlight.rlib",
+                     "/sdk/crates/moonlight/src/lib.rs"):
+            bad = copy.deepcopy(self.event); bad["filenames"] = [name]
+            with self.subTest(name=name), self.assertRaisesRegex(build.Refused, "artifact_output_path"):
+                build.artifact_candidate([self.event, bad], self.metadata)
+        for root in ("target", "build"):
+            raw = copy.deepcopy(self.event); raw["filenames"] = [f"/out/{root}/web-release/private.rs"]
+            with self.subTest(raw_root=root), self.assertRaisesRegex(build.Refused, "moonlight_artifact_missing"):
+                build.artifact_candidate([raw], self.metadata)
+        duplicate = copy.deepcopy(self.event)
+        duplicate["filenames"] = [self.event["filenames"][0].replace("/out/target/", "/out/build/")]
+        with self.assertRaisesRegex(build.Refused, "artifact_collision"):
+            build.artifact_candidate([self.event, duplicate], self.metadata)
+
+    def test_artifact_inventory_reads_only_emitted_rows_under_both_owned_roots(self):
+        output = self.root / "output"; output.mkdir()
+        events, expected = [], []
+        for root in ("target", "build"):
+            event = copy.deepcopy(self.event)
+            relative = f"{root}/{build.TARGET}/web-release/deps/libmoonlight-{root}.rlib"
+            event["filenames"] = ["/out/" + relative]; events.append(event)
+            path = output / relative; path.parent.mkdir(parents=True)
+            raw = b"!<arch>\nPUBLIC_MODELED_ARTIFACT_" + root.encode(); path.write_bytes(raw)
+            (path.parent / "private.rs").write_text("UNLISTED_SOURCE_MUST_NOT_RETURN")
+            expected.append((root, raw))
+        rows = build.artifact_candidate(events, self.metadata)
+        inventory = build.artifact_inventory(output, rows)
+        self.assertEqual(inventory, sorted([
+            {"path": f"lib/{build.TARGET}/libmoonlight-{root}.rlib", "role": "opaque_rlib",
+             "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+            for root, raw in expected], key=lambda row: row["path"]))
+        self.assertNotIn("private.rs", json.dumps(inventory))
+        victim = output / rows[-1]["compiler_output"]
+        victim.unlink(); victim.symlink_to(output / rows[0]["compiler_output"])
+        with self.assertRaises(OSError): build.artifact_inventory(output, rows)
+
     def test_container_role_has_only_source_registry_output_mounts_and_no_swap(self):
         class Owner:
             containers = []

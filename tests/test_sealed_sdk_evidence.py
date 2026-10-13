@@ -73,6 +73,65 @@ class SelectionTest(unittest.TestCase):
         for number, changed in enumerate(mutations):
             with self.subTest(number=number), self.assertRaises(ValueError): selection.exact_artifact_selection(changed, receipt)
 
+    def test_exact_selection_preserves_target_build_roots_and_all_compiled_roles(self):
+        for root in ("target", "build"):
+            for triple, role, filename in ((selection.TARGET, "opaque_rlib", "libtoy.rlib"),
+                    (selection.TARGET, "opaque_metadata", "libtoy.rmeta"),
+                    (selection.HOST, "opaque_rlib", "libhost.rlib"),
+                    (selection.HOST, "opaque_proc_macro", "libmacro.so")):
+                with self.subTest(root=root, triple=triple, role=role):
+                    body, receipt = candidate()
+                    source = root + "/" + ((triple + "/") if triple == selection.TARGET else "") + "web-release/deps/" + filename
+                    path = f"lib/{triple}/{filename}"
+                    body["files"] = [{"public_path": path, "compiler_output": source, "target": triple, "role": role}]
+                    body["artifact_inventory"] = [{"path": path, "role": role, "bytes": 8, "sha256": "d" * 64}]
+                    receipt["artifact_inventory_sha256"] = exporter.digest(exporter.canonical(exporter.plain_inventory(body["artifact_inventory"])))
+                    selected = seal.bound_artifact_selection(body, receipt, selection, exporter)
+                    self.assertEqual(selected, [{"compiler_output": source, **body["artifact_inventory"][0]}])
+                    with self.assertRaisesRegex(ValueError, "compile_inventory_join"):
+                        seal.bound_artifact_selection(body, {**receipt, "artifact_inventory_sha256": "0" * 64}, selection, exporter)
+
+    def test_build_root_selection_retains_path_role_bijection_and_private_fd_refusals(self):
+        for source in ("build-other/deps/libtoy.rlib", "target-other/deps/libtoy.rlib",
+                       "build/../target/deps/libtoy.rlib", "/out/build/deps/libtoy.rlib",
+                       "sdk/crates/deps/libtoy.rlib"):
+            body, receipt = candidate(); body["files"][0]["compiler_output"] = source
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "artifact_path"):
+                selection.exact_artifact_selection(body, receipt)
+        for root in ("target", "build"):
+            for source_triple, claimed_triple in ((selection.TARGET, selection.HOST),
+                                                 (selection.HOST, selection.TARGET)):
+                body, receipt = candidate()
+                source = root + "/" + ((selection.TARGET + "/") if source_triple == selection.TARGET else "") + "web-release/deps/libtoy.rlib"
+                path = f"lib/{claimed_triple}/libtoy.rlib"
+                body["files"][0].update(compiler_output=source, target=claimed_triple, public_path=path)
+                body["artifact_inventory"][0]["path"] = path
+                with self.subTest(root=root, source_triple=source_triple, claimed_triple=claimed_triple), \
+                        self.assertRaisesRegex(ValueError, "artifact_role"):
+                    selection.exact_artifact_selection(body, receipt)
+        body, receipt = candidate()
+        body["files"][0].update(public_path=f"lib/{selection.TARGET}/libtoy.rs", compiler_output="build/deps/libtoy.rs")
+        body["artifact_inventory"][0]["path"] = body["files"][0]["public_path"]
+        with self.assertRaisesRegex(ValueError, "artifact_role"):
+            selection.exact_artifact_selection(body, receipt)
+        body, receipt = candidate(); body["files"][0]["compiler_output"] = "build/deps/libtoy.rlib"
+        duplicate = copy.deepcopy(body["files"][0]); duplicate["compiler_output"] = "target/deps/libtoy.rlib"
+        body["files"].append(duplicate); body["artifact_inventory"].append(copy.deepcopy(body["artifact_inventory"][0]))
+        with self.assertRaisesRegex(ValueError, "artifact_inventory"):
+            selection.exact_artifact_selection(body, receipt)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); folder = root / "build/deps"; folder.mkdir(parents=True)
+            raw = b"!<arch>\nPUBLIC_MODELED_ONLY"; artifact = folder / "libtoy.rlib"; artifact.write_bytes(raw)
+            item = {"compiler_output": "build/deps/libtoy.rlib", "bytes": len(raw), "sha256": seal.digest(raw), "role": "opaque_rlib"}
+            self.assertEqual(seal.artifact_bytes(root, item), raw)
+            with self.assertRaisesRegex(ValueError, "artifact_pin_changed"):
+                seal.artifact_bytes(root, {**item, "sha256": "0" * 64})
+            artifact.unlink(); artifact.symlink_to(root / "missing")
+            with self.assertRaises(OSError): seal.artifact_bytes(root, item)
+            artifact.unlink(); os.mkfifo(artifact)
+            with self.assertRaisesRegex(ValueError, "artifact_identity"):
+                seal.artifact_bytes(root, item)
+
     def test_failed_or_unknown_compile_cannot_become_evidence_selection(self):
         body, receipt = candidate()
         for key, value in (("exit_code", 1), ("timed_out", True), ("unknown_owners", [123]), ("resources_closed", False)):

@@ -720,6 +720,8 @@ def artifact_candidate(events, metadata):
             and isinstance(metadata.get("resolve", {}).get("nodes"), list), "cargo_metadata_invalid")
     packages = {item["id"]: item for item in metadata["packages"]}
     records = []
+    # These two fixed private roots share the same owned /out mount.
+    output_roots = (PurePosixPath("/out/target"), PurePosixPath("/out/build"))
     for event in events:
         if event["reason"] == "build-script-executed":
             require(not event.get("linked_libs"), "native_link_closure_requires_review")
@@ -730,10 +732,11 @@ def artifact_candidate(events, metadata):
         if "custom-build" in kind: continue
         for name in event["filenames"]:
             path = PurePosixPath(name)
-            require(path.is_absolute() and ".." not in path.parts and path.is_relative_to("/out/target"), "artifact_output_path")
+            root = next((root for root in output_roots if path.is_relative_to(root)), None)
+            require(path.is_absolute() and ".." not in path.parts and root is not None, "artifact_output_path")
             if path.suffix not in (".rlib", ".rmeta", ".so", ".dylib", ".dll"): continue
             host_macro = "proc-macro" in kind
-            host_library = not host_macro and not path.is_relative_to("/out/target/" + TARGET)
+            host_library = not host_macro and not path.is_relative_to(root / TARGET)
             require((host_macro and path.suffix in (".so", ".dylib", ".dll"))
                     or (not host_macro and path.suffix in (".rlib", ".rmeta")), "artifact_role_mismatch")
             package = packages[event["package_id"]]
