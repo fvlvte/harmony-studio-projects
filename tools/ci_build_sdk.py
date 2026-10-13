@@ -868,7 +868,7 @@ def compile(case, row, operation, verify, diagnostic=None):
         args[mount_index] = args[mount_index].removesuffix(",readonly")
         metadata = json.loads(start(owner, meta, args, ["cargo", "+" + RUST, "metadata", "--offline", "--locked",
             "--format-version", "1", "--manifest-path", "examples/game/Cargo.toml", "--filter-platform", TARGET,
-            "--features", "web-webgl2"],
+            "--filter-platform", HOST, "--features", "web-webgl2"],
             min(60, owner.remaining(60))))
         failure_stage(diagnostic, "compile_artifacts")
         candidate = artifact_candidate(events, metadata)

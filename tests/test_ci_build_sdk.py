@@ -750,6 +750,57 @@ class ProducerTest(unittest.TestCase):
                 self.assertNotIn("PRIVATE_PSI_PAYLOAD_DO_NOT_EMIT", json.dumps(public))
 
 
+    def test_metadata_caller_includes_target_and_host_inside_original_compile_boundary(self):
+        # Real main -> compile -> container -> metadata argv; command transport
+        # is modeled. Root's separate public Cargo1.98 metadata receipt proves
+        # the host-conditional omission, not this unit fixture or a private SDK.
+        with patch.object(build, "cargo_events", return_value=[copy.deepcopy(self.event)]):
+            value, commands, _ = self._compile_failure("metadata")
+        self.assertEqual(commands[-1], ("metadata", [
+            "cargo", "+1.98.1", "metadata", "--offline", "--locked",
+            "--format-version", "1", "--manifest-path", "examples/game/Cargo.toml",
+            "--filter-platform", build.TARGET, "--filter-platform", build.HOST,
+            "--features", "web-webgl2"]))
+        self.assertEqual(value["failure_stage"], "compile_metadata")
+        self.assertEqual(value["refusal_code"], "command_failed")
+        self.assertTrue(value["owner_close_succeeded"])
+        self.assertFalse(value["exported"])
+        self.assertFalse(value["runtime_qualified"])
+
+    def test_host_metadata_omission_requires_exact_id_and_keeps_list_guards(self):
+        # Modeled public Cargo IDs, following the independently executed toy
+        # shape; no package-name aliasing, guessed ID repair or guard bypass.
+        marker = {"id": "path+file:///sdk/host-marker#0.0.1",
+                  "name": "host-marker", "version": "0.0.1"}
+        host = copy.deepcopy(self.event)
+        host["package_id"] = marker["id"]
+        host["features"] = []
+        host["filenames"] = ["/out/build/web-release/deps/libhost_marker-abc.rlib"]
+        events = [copy.deepcopy(self.event), host]
+        target_only = copy.deepcopy(self.metadata)
+        target_and_host = copy.deepcopy(self.metadata)
+        target_and_host["packages"].append(marker)
+        with self.assertRaisesRegex(build.Refused, "artifact_metadata_invalid"):
+            build.artifact_candidate(events, target_only)
+        rows = build.artifact_candidate(events, target_and_host)
+        self.assertEqual(rows[-1]["package_id"], marker["id"])
+        self.assertEqual(rows[-1]["name"], "host-marker")
+        self.assertEqual(rows[-1]["target"], build.HOST)
+        self.assertEqual(rows[-1]["kind"], "host_library")
+        self.assertEqual(rows[-1]["compiler_output"], "build/web-release/deps/libhost_marker-abc.rlib")
+        self.assertEqual(rows[-1]["public_path"], "lib/" + build.HOST + "/libhost_marker-abc.rlib")
+        mutations = (("package_id", marker["id"] + "-foreign"),
+                     ("features", None), ("filenames", {"not": "an array"}))
+        for key, changed in mutations:
+            invalid = copy.deepcopy(host); invalid[key] = changed
+            with self.subTest(key=key), self.assertRaisesRegex(build.Refused, "artifact_metadata_invalid"):
+                build.artifact_candidate([self.event, invalid], target_and_host)
+        # A same-name/version package with a different ID cannot satisfy the join.
+        alias = copy.deepcopy(target_and_host)
+        alias["packages"][-1]["id"] = marker["id"] + "-different-source"
+        with self.assertRaisesRegex(build.Refused, "artifact_metadata_invalid"):
+            build.artifact_candidate(events, alias)
+
     def test_thin_lto_override_reaches_real_compile_container_and_changes_fingerprint(self):
         # Actual main/compile/container caller, modeled transport only. This is
         # not an SDK build, a Docker workload or a memory-improvement claim.
