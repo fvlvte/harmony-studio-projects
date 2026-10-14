@@ -32,6 +32,8 @@ ARCHIVE_URL = "https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v
 ARCHIVE_SHA = "6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4"
 ARCHIVE_BYTES = 17771923
 MAX_FILE, MAX_TOTAL, MAX_JSON, MAX_TAR, MAX_CIPHER = 64 << 20, 512 << 20, 2 << 20, 520 << 20, 528 << 20
+# Raw Cargo metadata is private input; only its typed projection may be returned.
+MAX_PRIVATE_CANDIDATE = 16 << 20
 ARCHIVE_NAMES = {"age", "age/age-keygen", "age/age-plugin-tag", "age/age-plugin-batchpass", "age/age-plugin-pq",
                  "age/age-plugin-tagpq", "age/age", "age/LICENSE", "age/age-inspect"}
 STOP = None
@@ -407,11 +409,11 @@ def recipient():
     return row
 
 
-def private_json(path, verify):
+def private_json(path, verify, maximum=MAX_JSON):
     info = path.lstat()
     require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o600, "private_json_mode")
-    raw = regular(path, MAX_JSON)
-    return verify.document(raw, MAX_JSON), raw
+    raw = regular(path, maximum)
+    return verify.document(raw, maximum), raw
 
 
 def tool(root, row):
@@ -506,7 +508,7 @@ def bound_artifact_selection(candidate, receipt, selection, exporter):
 
 
 def payload(case, producer, verify, selection, context, row, operation, pins, clock):
-    candidate, candidate_raw = private_json(case / "artifact-candidate.private.json", verify)
+    candidate, candidate_raw = private_json(case / "artifact-candidate.private.json", verify, MAX_PRIVATE_CANDIDATE)
     receipt, receipt_raw = private_json(case / "cargo-closure.private.json", verify)
     closed, closed_raw = private_json(case / "producer-closure.private.json", verify)
     require(set(candidate) == {"schema_version", "state", "operation", "source_revision", "authorization_id", "input_inventory_sha256",
@@ -652,7 +654,8 @@ def main(argv=None):
             tool(args.tool_root, approved); require(snapshot() == pins, "source_pin_changed")
             for name, wanted in (("artifact-candidate.private.json", receipts["candidate"]), ("cargo-closure.private.json", receipts["receipt"]),
                                  ("producer-closure.private.json", receipts["closed"])):
-                require(digest(regular(args.case / name, MAX_JSON)) == wanted, "receipt_changed")
+                require(digest(regular(args.case / name, MAX_PRIVATE_CANDIDATE if name == "artifact-candidate.private.json" else MAX_JSON))
+                        == wanted, "receipt_changed")
             for item in chosen:
                 clock(); _, identity = artifact_bytes(args.case / "compiler-output", item, with_identity=True)
                 require(identity == identities[item["path"]], "artifact_identity_changed")

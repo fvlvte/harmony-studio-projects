@@ -40,7 +40,7 @@ def cargo_graph_projection(metadata):
         require(isinstance(features, dict) and len(features) <= MAX_ARTIFACTS, "cargo_features")
         projected = {text(k, 256): identifiers(v) for k, v in features.items()}
         targets = package["targets"]
-        require(isinstance(targets, list) and len(targets) <= 128, "cargo_targets")
+        require(isinstance(targets, list) and len(targets) <= 512, "cargo_targets")
         packages.append({"id": ident, "name": text(package["name"], 256), "version": text(package["version"], 256),
             "features": projected, "targets": [{"name": text(t["name"], 256), "kind": identifiers(t["kind"]),
                 "crate_types": identifiers(t["crate_types"])} for t in targets]})

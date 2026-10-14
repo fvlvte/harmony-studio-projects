@@ -325,4 +325,188 @@ class SealerDiagnosticTests(unittest.TestCase):
         self.assertEqual(calls, [("command", 5), ("command", 60), ("close", None)])
 
 
+
+class PrivateCandidateBoundaryTests(unittest.TestCase):
+    """Real private-input/projector/FD checks; modeled artifacts and age, no SDK."""
+
+    def fixture(self, case, *, retained_graph_large=False, target_count=1):
+        verify = load("ci_verify")
+        producer = load("ci_build_sdk")
+        operation = "00000000-0000-0000-0000-000000000002"
+        start = time.monotonic(); pins = seal.snapshot()
+        body, receipt = candidate()
+        body["profile"] = receipt["profile"] = copy.deepcopy(producer.PROFILE)
+        raw = b"!<arch>\nPUBLIC_MODELED_ONLY_NOT_COMPILED"
+        record = body["files"][0]
+        record.update(package_id="toy", name="toy", version="0.1.0", features=["web-webgl2"],
+                      profile=copy.deepcopy(producer.PROFILE), kind=["lib"])
+        item = body["artifact_inventory"][0]
+        item.update(bytes=len(raw), sha256=seal.digest(raw))
+        output = case / "compiler-output" / record["compiler_output"]
+        output.parent.mkdir(parents=True); output.write_bytes(raw)
+        receipt.update(schema_version=1, producer="trusted-rust-artifact-producer/1",
+                       rustflags_sha256="e" * 64, lockfile_sha256="f" * 64,
+                       artifact_inventory_sha256=exporter.digest(exporter.canonical(exporter.plain_inventory(body["artifact_inventory"]))))
+        verify.save(case / "cargo-closure.private.json", receipt)
+        package = {"id": "toy", "name": "toy", "version": "0.1.0", "features": {"web": []},
+                   "targets": [{"name": "toy" if i == 0 else "public-example-" + str(i),
+                                "kind": ["lib"] if i == 0 else ["example"],
+                                "crate_types": ["rlib"] if i == 0 else ["bin"],
+                                "src_path": "/public/modeled.rs"} for i in range(target_count)],
+                   "metadata": {"omitted_public_fixture": "MUST_BE_OMITTED" + "X" * (seal.MAX_JSON + 1)}}
+        if retained_graph_large:
+            package["features"]["web"] = [str(i) + "Y" * 1024 for i in range(2100)]
+        body.update(operation=operation, cargo_receipt_sha256=seal.digest((case / "cargo-closure.private.json").read_bytes()),
+                    cargo_metadata={"packages": [package], "resolve": {"root": "toy", "nodes": [
+                        {"id": "toy", "dependencies": [], "deps": [], "features": ["web"]}]}}, gaps=["modeled_not_qualified"])
+        verify.save(case / "artifact-candidate.private.json", body)
+        owner = types.SimpleNamespace(journal_failed=False,
+            children=[{"pid": 10, "pgid": 10, "reaped": True, "group_closed": True, "returncode": 0}], containers=[])
+        for i, phase in enumerate(("toolchain", "prefetch", "compile", "metadata")):
+            owner.containers.append({"cid": str(i) * 64, "name": "modeled-" + phase,
+                "image": "sha256:" + "e" * 64, "operation": operation, "phase": phase,
+                "absent": True, "identity_verified": True})
+        closed = selection.owner_closure_projection(owner, operation, pins)
+        closed.update(original_exit_code=0, stop_signal=None, source_unchanged=True,
+                      started_monotonic=start, hard_monotonic=start + 3900)
+        verify.save(case / "producer-closure.private.json", closed)
+        return verify, body, {"source_revision": body["source_revision"], "authorization_id": body["authorization_id"]}, \
+            operation, {"started_monotonic": start}, pins
+
+    def test_large_private_candidate_projects_under_unchanged_return_limit(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as temporary:
+            case = Path(temporary).resolve()
+            verify, body, row, operation, context, pins = self.fixture(case)
+            path = case / "artifact-candidate.private.json"
+            self.assertGreater(path.stat().st_size, seal.MAX_JSON)
+            self.assertLess(path.stat().st_size, seal.MAX_PRIVATE_CANDIDATE)
+            with self.assertRaisesRegex(ValueError, "input_identity"):
+                seal.private_json(path, verify)  # Every other private JSON keeps its 2 MiB default.
+            bodies, _, _, receipts, chosen, _ = seal.payload(case, None, verify, selection, context, row, operation, pins, lambda: None)
+            projected = json.loads(bodies["metadata/artifact-candidate.json"])
+            self.assertNotIn("cargo_metadata", projected)
+            self.assertIn("cargo_graph", projected)
+            self.assertNotIn("MUST_BE_OMITTED", bodies["metadata/artifact-candidate.json"].decode())
+            self.assertTrue(all(len(raw) <= seal.MAX_JSON for name, raw in bodies.items() if name.startswith("metadata/")))
+            self.assertEqual(receipts["candidate"], seal.digest(seal.regular(path, seal.MAX_PRIVATE_CANDIDATE)))
+            self.assertEqual(bodies[chosen[0]["path"]], b"!<arch>\nPUBLIC_MODELED_ONLY_NOT_COMPILED")
+            self.assertEqual((seal.MAX_FILE, seal.MAX_TOTAL, seal.MAX_JSON, seal.MAX_TAR, seal.MAX_CIPHER),
+                             (64 << 20, 512 << 20, 2 << 20, 520 << 20, 528 << 20))
+
+    def test_large_projected_metadata_still_refuses(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as temporary:
+            case = Path(temporary).resolve()
+            verify, _, row, operation, context, pins = self.fixture(case, retained_graph_large=True)
+            self.assertLess((case / "artifact-candidate.private.json").stat().st_size, seal.MAX_PRIVATE_CANDIDATE)
+            with self.assertRaisesRegex(ValueError, "metadata_bound"):
+                seal.payload(case, None, verify, selection, context, row, operation, pins, lambda: None)
+
+    def test_private_candidate_limit_preserves_fd_identity_mode_and_json_refusals(self):
+        verify = load("ci_verify")
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as temporary:
+            root = Path(temporary).resolve(); path = root / "candidate.json"
+            with path.open("wb") as stream: stream.truncate(seal.MAX_PRIVATE_CANDIDATE + 1)
+            path.chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "input_identity"):
+                seal.private_json(path, verify, seal.MAX_PRIVATE_CANDIDATE)
+            path.unlink(); verify.save(path, {"toy": True})
+            self.assertEqual(seal.private_json(path, verify, seal.MAX_PRIVATE_CANDIDATE)[0], {"toy": True})
+            link = root / "hardlink"; os.link(path, link)
+            with self.assertRaisesRegex(ValueError, "input_identity"):
+                seal.private_json(path, verify, seal.MAX_PRIVATE_CANDIDATE)
+            link.unlink(); path.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "private_json_mode"):
+                seal.private_json(path, verify, seal.MAX_PRIVATE_CANDIDATE)
+            path.unlink(); path.symlink_to(root / "missing")
+            with self.assertRaisesRegex(ValueError, "private_json_mode"):
+                seal.private_json(path, verify, seal.MAX_PRIVATE_CANDIDATE)
+            path.unlink(); os.mkfifo(path, 0o600)
+            with self.assertRaisesRegex(ValueError, "private_json_mode"):
+                seal.private_json(path, verify, seal.MAX_PRIVATE_CANDIDATE)
+            path.unlink(); path.write_bytes(b'{"toy":1,"toy":2}'); path.chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "duplicate_json_key"):
+                seal.private_json(path, verify, seal.MAX_PRIVATE_CANDIDATE)
+
+    def test_projector_preserves_all_437_targets_under_bounded_512_policy(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as temporary:
+            case = Path(temporary).resolve()
+            verify, body, row, operation, context, pins = self.fixture(case, target_count=437)
+            bodies, _, _, _, _, _ = seal.payload(case, None, verify, selection, context, row, operation, pins, lambda: None)
+            projected = json.loads(bodies["metadata/artifact-candidate.json"])["cargo_graph"]["packages"][0]["targets"]
+            expected = [{key: item[key] for key in ("name", "kind", "crate_types")}
+                        for item in body["cargo_metadata"]["packages"][0]["targets"]]
+            self.assertEqual(len(projected), 437)
+            self.assertEqual(projected, expected)  # Every target and its order survive; no clipping/filtering.
+            self.assertLessEqual(len(bodies["metadata/artifact-candidate.json"]), seal.MAX_JSON)
+            self.assertNotIn("MUST_BE_OMITTED", bodies["metadata/artifact-candidate.json"].decode())
+
+    def test_projector_refuses_513_targets_and_invalid_target_container_shapes(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as temporary:
+            case = Path(temporary).resolve()
+            verify, body, row, operation, context, pins = self.fixture(case, target_count=513)
+            with self.assertRaisesRegex(ValueError, "cargo_targets"):
+                seal.payload(case, None, verify, selection, context, row, operation, pins, lambda: None)
+            metadata = copy.deepcopy(body["cargo_metadata"])
+            metadata["packages"][0]["targets"] = metadata["packages"][0]["targets"][:512]
+            self.assertEqual(len(selection.cargo_graph_projection(metadata)["packages"][0]["targets"]), 512)
+            for value in (None, {}, (), "targets", 1, True):
+                changed = copy.deepcopy(metadata); changed["packages"][0]["targets"] = value
+                with self.subTest(value_type=type(value).__name__), self.assertRaisesRegex(ValueError, "cargo_targets"):
+                    selection.cargo_graph_projection(changed)
+            for key, value, code in (("name", None, "metadata_string"), ("kind", "lib", "metadata_list"),
+                                     ("crate_types", None, "metadata_list")):
+                changed = copy.deepcopy(metadata); changed["packages"][0]["targets"][0][key] = value
+                with self.subTest(key=key), self.assertRaisesRegex(ValueError, code):
+                    selection.cargo_graph_projection(changed)
+
+    def test_actual_main_rechecks_large_candidate_after_modeled_encryption_and_rejects_drift(self):
+        for changed in (False, True):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as temporary:
+                root = Path(temporary).resolve(); case = root / "case"; case.mkdir()
+                verify, body, row, operation, context, pins = self.fixture(case)
+                calls = []
+                class Owner:
+                    def __init__(self, evidence, started): self.hard = started + 3900; self.children = []
+                    def remaining(self, maximum): return maximum
+                    def command(self, argv, maximum):
+                        calls.append(("command", maximum))
+                        self.children.append({"reaped": True, "group_closed": True})
+                        if "--version" in argv: return b"1.3.2\n"
+                        self_path = Path(argv[argv.index("--output") + 1])
+                        self_path.write_bytes(b"age-encryption.org/v1\n" + b"MODELED_NOT_REAL_ENCRYPTION" * 8); self_path.chmod(0o600)
+                        if changed:
+                            mutated = copy.deepcopy(body); mutated["cargo_metadata"]["packages"][0]["description"] = "public fixture drift"
+                            verify.save(case / "artifact-candidate.private.json", mutated)
+                        return b""
+                    def close(self): calls.append(("close", None)); return True
+                producer = types.SimpleNamespace(approval=lambda env: (row, operation), helpers=lambda: (verify, None),
+                    prepared=lambda *args: context)
+                def module(name, module_pins):
+                    self.assertEqual(module_pins, pins)
+                    return {"ci_build_sdk": producer, "evidence_selection": selection, "opaque_sdk": exporter}[name]
+                output = io.StringIO(); old_cwd = Path.cwd()
+                try:
+                    os.chdir(root)
+                    with patch.object(seal, "module", side_effect=module), patch.object(verify, "Owner", Owner), \
+                            patch.object(verify, "linux_resources", return_value=None), \
+                            patch.object(seal, "recipient", return_value={"recipient": "age1-public-modeled-only", "age_binary_sha256": "e" * 64}), \
+                            patch.object(seal, "tool", return_value=Path("/public/modeled-age")), \
+                            patch.object(seal.shutil, "disk_usage", return_value=types.SimpleNamespace(free=20 * 1024**3)), \
+                            patch.object(seal.signal, "signal"), patch.object(seal.signal, "setitimer"), contextlib.redirect_stdout(output):
+                        code = seal.main(["--phase", "seal", "--case", str(case), "--tool-root", str(root / "age")])
+                finally: os.chdir(old_cwd)
+                value = json.loads(output.getvalue())
+                self.assertEqual(code, 1 if changed else 0)
+                self.assertFalse(value["SDK_qualified"])
+                if changed:
+                    self.assertEqual(value["failure_stage"], "postseal_integrity")
+                    self.assertEqual(value["refusal_code"], "receipt_changed")
+                    self.assertTrue(value["owner_close_succeeded"])
+                    self.assertFalse((root / ".sdk-cipher-evidence").exists())
+                else:
+                    self.assertEqual(value["state"], "encrypted_evidence_delivered_not_qualified")
+                    self.assertEqual({p.name for p in (root / ".sdk-cipher-evidence").iterdir()}, {"evidence.tar.age", "cipher-receipt.json"})
+                self.assertEqual([v for v in calls if v[0] == "command"], [("command", 5), ("command", 60)])
+
+
 if __name__ == "__main__": unittest.main()
