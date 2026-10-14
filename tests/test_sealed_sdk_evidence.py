@@ -389,9 +389,15 @@ class PrivateCandidateBoundaryTests(unittest.TestCase):
             self.assertNotIn("MUST_BE_OMITTED", bodies["metadata/artifact-candidate.json"].decode())
             self.assertTrue(all(len(raw) <= seal.MAX_JSON for name, raw in bodies.items() if name.startswith("metadata/")))
             self.assertEqual(receipts["candidate"], seal.digest(seal.regular(path, seal.MAX_PRIVATE_CANDIDATE)))
-            self.assertEqual(bodies[chosen[0]["path"]], b"!<arch>\nPUBLIC_MODELED_ONLY_NOT_COMPILED")
+            # The archive preserves the same exact artifact bytes; payload now
+            # retains a bounded lazy source instead of every artifact in RAM.
+            import tarfile
+            streamed = case / "streamed.tar"
+            seal.archive_payload(streamed, bodies, lambda: None)
+            with tarfile.open(streamed) as archive:
+                self.assertEqual(archive.extractfile(chosen[0]["path"]).read(), b"!<arch>\nPUBLIC_MODELED_ONLY_NOT_COMPILED")
             self.assertEqual((seal.MAX_FILE, seal.MAX_TOTAL, seal.MAX_JSON, seal.MAX_TAR, seal.MAX_CIPHER),
-                             (64 << 20, 512 << 20, 2 << 20, 520 << 20, 528 << 20))
+                             (64 << 20, 2 << 30, 2 << 20, (2 << 30) + (8 << 20), (2 << 30) + (16 << 20)))
 
     def test_large_projected_metadata_still_refuses(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as temporary:
@@ -495,7 +501,11 @@ class PrivateCandidateBoundaryTests(unittest.TestCase):
                             patch.object(seal.signal, "signal"), patch.object(seal.signal, "setitimer"), contextlib.redirect_stdout(output):
                         code = seal.main(["--phase", "seal", "--case", str(case), "--tool-root", str(root / "age")])
                 finally: os.chdir(old_cwd)
-                value = json.loads(output.getvalue())
+                observations = [json.loads(line) for line in output.getvalue().splitlines()]
+                self.assertEqual(len(observations), 2)
+                sizes, value = observations
+                self.assertEqual(sizes, {"schema_version": 1, "state": "declared_artifact_sizes_not_qualified",
+                                         "SDK_qualified": False, **seal.declared_artifact_sizes(body, selection)})
                 self.assertEqual(code, 1 if changed else 0)
                 self.assertFalse(value["SDK_qualified"])
                 if changed:
@@ -507,6 +517,127 @@ class PrivateCandidateBoundaryTests(unittest.TestCase):
                     self.assertEqual(value["state"], "encrypted_evidence_delivered_not_qualified")
                     self.assertEqual({p.name for p in (root / ".sdk-cipher-evidence").iterdir()}, {"evidence.tar.age", "cipher-receipt.json"})
                 self.assertEqual([v for v in calls if v[0] == "command"], [("command", 5), ("command", 60)])
+
+
+
+class StreamingPrivateEvidenceTests(unittest.TestCase):
+    """Actual small-file streams; large-budget rows are declarations, not SDK."""
+    def sized_candidate(self, count):
+        body, receipt = candidate()
+        body["files"], body["artifact_inventory"] = [], []
+        for i in range(count):
+            filename = "libtoy-" + str(i) + ".rlib"
+            path = "lib/" + selection.TARGET + "/" + filename
+            body["files"].append({"public_path": path,
+                "compiler_output": "build/" + selection.TARGET + "/web-release/deps/" + filename,
+                "target": selection.TARGET, "role": "opaque_rlib"})
+            body["artifact_inventory"].append({"path": path, "role": "opaque_rlib",
+                "bytes": selection.MAX_ARTIFACT, "sha256": "d" * 64})
+        receipt["artifact_inventory_sha256"] = exporter.digest(exporter.canonical(exporter.plain_inventory(body["artifact_inventory"])))
+        return body, receipt
+
+    def test_private_two_gib_selection_boundary_is_complete_and_public_guard_is_unchanged(self):
+        body, receipt = self.sized_candidate(32)
+        self.assertEqual(sum(x["bytes"] for x in body["artifact_inventory"]), 2 << 30)
+        self.assertEqual(seal.bound_artifact_selection(body, receipt, selection, exporter),
+            sorted([{"compiler_output": row["compiler_output"], **item}
+                    for row, item in zip(body["files"], body["artifact_inventory"])], key=lambda x: x["path"]))
+        body, receipt = self.sized_candidate(33)
+        body["artifact_inventory"][-1]["bytes"] = 1
+        receipt["artifact_inventory_sha256"] = exporter.digest(exporter.canonical(exporter.plain_inventory(body["artifact_inventory"])))
+        self.assertEqual(sum(x["bytes"] for x in body["artifact_inventory"]), (2 << 30) + 1)
+        with self.assertRaisesRegex(ValueError, "artifact_total_bound"):
+            seal.bound_artifact_selection(body, receipt, selection, exporter)
+        guard = load("bundle_guard")
+        self.assertEqual((guard.MAX_FILE, guard.MAX_TOTAL), (64 << 20, 512 << 20))
+        self.assertEqual((seal.MAX_TAR, seal.MAX_CIPHER), ((2 << 30) + (8 << 20), (2 << 30) + (16 << 20)))
+
+    def test_declared_witness_is_numeric_fixed_and_rejects_unsafe_shape(self):
+        body, _ = candidate()
+        body["artifact_inventory"][0]["path"] = "PRIVATE_PATH_MUST_NOT_PROJECT"
+        value = seal.declared_artifact_sizes(body, selection)
+        self.assertEqual(value, {"artifact_count": 1, "artifact_total_bytes": 8, "artifact_max_bytes": 8})
+        self.assertNotIn("PRIVATE", json.dumps(value))
+        for bad in (True, False, -1, 0, 1.0, "8", seal.MAX_FILE + 1):
+            changed = copy.deepcopy(body); changed["artifact_inventory"][0]["bytes"] = bad
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "artifact_inventory"):
+                seal.declared_artifact_sizes(changed, selection)
+        for rows in (None, {}, [], [body["artifact_inventory"][0]] * (selection.MAX_ARTIFACTS + 1)):
+            with self.subTest(rows_type=type(rows).__name__), self.assertRaisesRegex(ValueError, "artifact_count"):
+                seal.declared_artifact_sizes({"artifact_inventory": rows}, selection)
+        changed = copy.deepcopy(body); changed["artifact_inventory"][0]["raw_secret"] = "MUST_NOT_PROJECT"
+        with self.assertRaisesRegex(ValueError, "artifact_inventory"):
+            seal.declared_artifact_sizes(changed, selection)
+
+    def test_tar_streams_exact_artifact_and_detects_drift_then_restores(self):
+        import tarfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); leaf = root / "build/deps/libtoy.rlib"; leaf.parent.mkdir(parents=True)
+            raw = b"!<arch>\n" + b"PUBLIC_MODELED_BYTES" * 8192; leaf.write_bytes(raw)
+            item = {"compiler_output": "build/deps/libtoy.rlib", "bytes": len(raw), "sha256": seal.digest(raw), "role": "opaque_rlib"}
+            _, identity = seal.artifact_bytes(root, item, with_identity=True)
+            name = "lib/" + selection.TARGET + "/libtoy.rlib"
+            source = seal.ArtifactSource(root, item, identity)
+            sha, _ = seal.archive_payload(root / "positive.tar", {name: source, "metadata/inventory.json": b"{}\n"}, lambda: None)
+            self.assertEqual(sha, seal.digest((root / "positive.tar").read_bytes()))
+            with tarfile.open(root / "positive.tar") as archive:
+                self.assertEqual(archive.extractfile(name).read(), raw)
+                self.assertTrue(all(x.isfile() and x.mode == 0o600 and x.uid == x.gid == x.mtime == 0 for x in archive))
+            leaf.write_bytes(b"!<arch>\n" + b"CHANGED_BYTES_______" * 8192)
+            with self.assertRaisesRegex(ValueError, "artifact_pin_changed"):
+                seal.archive_payload(root / "changed.tar", {name: source}, lambda: None)
+            leaf.write_bytes(raw)
+            _, restored_identity = seal.artifact_bytes(root, item, with_identity=True)
+            seal.archive_payload(root / "restored.tar", {name: seal.ArtifactSource(root, item, restored_identity)}, lambda: None)
+            with tarfile.open(root / "restored.tar") as archive:
+                self.assertEqual(archive.extractfile(name).read(), raw)
+
+    def test_stream_hash_exact_bound_and_deadline_are_checked_each_block(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "public-toy"; raw = b"X" * 131073; path.write_bytes(raw)
+            with patch.object(seal, "STREAM_BLOCK", 32768):
+                calls = []
+                def clock(): calls.append(True)
+                sha, size, _ = seal.stream_file(path, len(raw), clock)
+                self.assertEqual((sha, size), (seal.digest(raw), len(raw)))
+                self.assertGreater(len(calls), 4)
+                with self.assertRaisesRegex(ValueError, "input_identity"):
+                    seal.stream_file(path, len(raw) - 1, clock)
+                def expired():
+                    calls.append(True)
+                    if len(calls) > 2: raise ValueError("evidence_deadline")
+                calls.clear()
+                with self.assertRaisesRegex(ValueError, "evidence_deadline"):
+                    seal.stream_file(path, len(raw), expired)
+
+    def test_cipher_stream_copy_hash_identity_and_fresh_restore(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); source = root / "public-toy.age"
+            raw = b"age-encryption.org/v1\n" + b"NOT_REAL_CRYPTO" * 8192; source.write_bytes(raw)
+            wanted, size, identity = seal.stream_file(source, seal.MAX_CIPHER, lambda: None, prefix=b"age-encryption.org/v1\n")
+            destination = root / "copied.age"
+            self.assertEqual(seal.copy_cipher(source, destination, wanted, identity, lambda: None), size)
+            self.assertEqual(destination.read_bytes(), raw)
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(FileExistsError): seal.copy_cipher(source, destination, wanted, identity, lambda: None)
+            source.write_bytes(raw + b"changed")
+            with self.assertRaisesRegex(ValueError, "input_changed"):
+                seal.copy_cipher(source, root / "drift.age", wanted, identity, lambda: None)
+            source.write_bytes(raw)
+            wanted, _, identity = seal.stream_file(source, seal.MAX_CIPHER, lambda: None, prefix=b"age-encryption.org/v1\n")
+            self.assertEqual(seal.copy_cipher(source, root / "restored.age", wanted, identity, lambda: None), len(raw))
+            self.assertEqual((root / "restored.age").read_bytes(), raw)
+
+    def test_payload_cap_includes_metadata_and_archive_refuses_overflow(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); bodies = {"metadata/inventory.json": b"X" * 129}
+            with patch.object(seal, "MAX_TOTAL", 64), patch.object(seal, "MAX_JSON", 64):
+                with self.assertRaisesRegex(ValueError, "payload_total_bound"):
+                    seal.archive_payload(root / "overflow.tar", bodies, lambda: None)
+            self.assertFalse((root / "overflow.tar").exists())
+            with patch.object(seal, "MAX_TAR", 64):
+                with self.assertRaisesRegex(ValueError, "input_identity"):
+                    seal.archive_payload(root / "tar-overflow.tar", {"metadata/inventory.json": b"{}"}, lambda: None)
 
 
 if __name__ == "__main__": unittest.main()

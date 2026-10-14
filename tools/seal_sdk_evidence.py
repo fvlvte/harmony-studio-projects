@@ -31,7 +31,13 @@ VERSION = "1.3.2"
 ARCHIVE_URL = "https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-arm64.tar.gz"
 ARCHIVE_SHA = "6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4"
 ARCHIVE_BYTES = 17771923
-MAX_FILE, MAX_TOTAL, MAX_JSON, MAX_TAR, MAX_CIPHER = 64 << 20, 512 << 20, 2 << 20, 520 << 20, 528 << 20
+# Private full emitted-evidence capture; public bundle_guard keeps 512 MiB.
+# MAX_TOTAL includes artifacts and the three projected metadata records. The
+# inventory (<=2 MiB) and <=4100 USTAR headers/padding fit the extra 8 MiB;
+# age framing fits the further 8 MiB. No total-sized buffer is retained.
+MAX_FILE, MAX_TOTAL, MAX_JSON = 64 << 20, 2 << 30, 2 << 20
+MAX_TAR, MAX_CIPHER = MAX_TOTAL + (8 << 20), MAX_TOTAL + (16 << 20)
+STREAM_BLOCK = 1 << 20
 # Raw Cargo metadata is private input; only its typed projection may be returned.
 MAX_PRIVATE_CANDIDATE = 16 << 20
 ARCHIVE_NAMES = {"age", "age/age-keygen", "age/age-plugin-tag", "age/age-plugin-batchpass", "age/age-plugin-pq",
@@ -498,6 +504,73 @@ def artifact_bytes(root, item, *, with_identity=False):
     finally: os.close(fd)
 
 
+
+class ArtifactSource:
+    """One exact emitted file, captured at most 64 MiB at a time for USTAR."""
+    def __init__(self, root, item, identity):
+        self.root, self.item, self.identity = root, dict(item), identity
+
+    def __len__(self): return self.item["bytes"]
+
+    def capture(self, clock):
+        clock()
+        raw, identity = artifact_bytes(self.root, self.item, with_identity=True)
+        require(identity == self.identity, "artifact_identity_changed")
+        clock()
+        return raw
+
+
+def stream_file(path, maximum, clock, *, sink=None, prefix=None, expected_identity=None):
+    """Hash/copy one stable regular FD without retaining its entire body."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as source:
+        before = os.fstat(source.fileno())
+        fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                and 0 <= before.st_size <= maximum, "input_identity")
+        if expected_identity is not None:
+            require(all(getattr(before, k) == getattr(expected_identity, k) for k in fields), "input_changed")
+        hashed = hashlib.sha256(); count = 0; first = True
+        while True:
+            clock(); block = source.read(min(STREAM_BLOCK, maximum + 1 - count))
+            if not block: break
+            if first and prefix is not None:
+                require(block.startswith(prefix), "cipher_format")
+            first = False; count += len(block)
+            require(count <= maximum, "input_identity")
+            hashed.update(block)
+            if sink is not None: sink.write(block)
+        clock(); after = os.fstat(source.fileno()); visible = path.lstat()
+        require(count == before.st_size and all(getattr(before, k) == getattr(after, k) == getattr(visible, k)
+                for k in fields), "input_changed")
+        if prefix is not None: require(not first and count > 100, "cipher_format")
+        return hashed.hexdigest(), count, before
+
+
+def copy_cipher(source, destination, expected_sha, expected_identity, clock):
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        sha, count, _ = stream_file(source, MAX_CIPHER, clock, sink=stream,
+            prefix=b"age-encryption.org/v1\n", expected_identity=expected_identity)
+        require(sha == expected_sha, "cipher_copy_changed")
+        stream.flush(); os.fsync(stream.fileno())
+    clock(); copied_sha, copied_bytes, _ = stream_file(destination, MAX_CIPHER, clock)
+    require(copied_sha == expected_sha and copied_bytes == count, "cipher_copy_changed")
+    return count
+
+
+def declared_artifact_sizes(candidate, selection):
+    """Fixed numeric declarations only; no path/role/package/error projection."""
+    rows = candidate["artifact_inventory"]
+    require(type(rows) is list and 0 < len(rows) <= selection.MAX_ARTIFACTS, "artifact_count")
+    sizes = []
+    for item in rows:
+        require(type(item) is dict and set(item) == {"path", "role", "bytes", "sha256"}
+                and type(item["bytes"]) is int and 0 < item["bytes"] <= MAX_FILE, "artifact_inventory")
+        sizes.append(item["bytes"])
+    return {"artifact_count": len(sizes), "artifact_total_bytes": sum(sizes), "artifact_max_bytes": max(sizes)}
+
+
 def bound_artifact_selection(candidate, receipt, selection, exporter):
     chosen = selection.exact_artifact_selection(candidate, receipt)
     # This is the producer's exact maintained plain-inventory serialization,
@@ -535,6 +608,9 @@ def payload(case, producer, verify, selection, context, row, operation, pins, cl
     require(all(closed[k] == check[k] for k in check), "compile_closure_shape")
     require(closed["started_monotonic"] == context["started_monotonic"]
             and closed["hard_monotonic"] == context["started_monotonic"] + 3900, "compile_original_deadline")
+    sizes = declared_artifact_sizes(candidate, selection)
+    print(canonical({"schema_version": 1, "state": "declared_artifact_sizes_not_qualified",
+                     "SDK_qualified": False, **sizes}).decode(), end="", flush=True)
     chosen = bound_artifact_selection(candidate, receipt, selection, module("opaque_sdk", pins))
     projected = {k: candidate[k] for k in ("schema_version", "state", "operation", "source_revision", "authorization_id",
         "input_inventory_sha256", "environment_policy_sha256", "profile", "features", "compiler", "target", "resources_closed",
@@ -550,8 +626,12 @@ def payload(case, producer, verify, selection, context, row, operation, pins, cl
     for item in chosen:
         clock(); raw, identity = artifact_bytes(case / "compiler-output", item, with_identity=True)
         identities[item["path"]] = identity
-        bodies[item["path"]] = raw; total += len(raw); require(total <= MAX_TOTAL, "payload_total_bound")
-    inventory = [{"path": path, "bytes": len(raw), "sha256": digest(raw)} for path, raw in sorted(bodies.items())]
+        bodies[item["path"]] = ArtifactSource(case / "compiler-output", item, identity)
+        total += len(raw); del raw
+        require(total <= MAX_TOTAL, "payload_total_bound")
+    inventory = [{"path": path, "bytes": len(raw), "sha256":
+                  raw.item["sha256"] if isinstance(raw, ArtifactSource) else digest(raw)}
+                 for path, raw in sorted(bodies.items())]
     inventory_raw = canonical({"schema_version": 1, "files": inventory})
     require(len(inventory_raw) <= MAX_JSON, "inventory_bound")
     bodies["metadata/inventory.json"] = inventory_raw
@@ -565,11 +645,13 @@ def archive_payload(path, bodies, clock):
     with os.fdopen(fd, "wb") as stream:
         with tarfile.open(fileobj=stream, mode="w", format=tarfile.USTAR_FORMAT) as tar:
             for name, raw in sorted(bodies.items()):
-                clock(); member = tarfile.TarInfo(name); member.size = len(raw)
+                clock(); captured = raw.capture(clock) if isinstance(raw, ArtifactSource) else raw
+                member = tarfile.TarInfo(name); member.size = len(captured)
                 member.mode = 0o600; member.uid = member.gid = member.mtime = 0; member.uname = member.gname = ""
-                tar.addfile(member, io.BytesIO(raw))
+                tar.addfile(member, io.BytesIO(captured))
+                del captured
         stream.flush(); os.fsync(stream.fileno())
-    clock(); raw = regular(path, MAX_TAR); return digest(raw), path.lstat()
+    clock(); sha, _, identity = stream_file(path, MAX_TAR, clock); return sha, identity
 
 
 def main(argv=None):
@@ -661,19 +743,18 @@ def main(argv=None):
                 require(identity == identities[item["path"]], "artifact_identity_changed")
             current = plain.lstat(); require((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
                     == (plain_identity.st_dev, plain_identity.st_ino, plain_identity.st_size, plain_identity.st_mtime_ns)
-                    and digest(regular(plain, MAX_TAR)) == plain_sha, "plaintext_changed")
+                    and stream_file(plain, MAX_TAR, clock)[0] == plain_sha, "plaintext_changed")
             plain.unlink(); plain = None
-            cipher_raw = regular(cipher, MAX_CIPHER)
-            require(cipher_raw.startswith(b"age-encryption.org/v1\n") and len(cipher_raw) > 100, "cipher_format")
+            cipher_sha, cipher_bytes, cipher_identity = stream_file(cipher, MAX_CIPHER, clock,
+                prefix=b"age-encryption.org/v1\n")
             stage = "delivery"
             clock(); public = Path.cwd() / ".sdk-cipher-evidence"; public.mkdir(mode=0o700); public_created = True
             final = public / "evidence.tar.age"
-            fd = os.open(final, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(fd, "wb") as stream: stream.write(cipher_raw); stream.flush(); os.fsync(stream.fileno())
-            clock(); require(digest(regular(final, MAX_CIPHER)) == digest(cipher_raw), "cipher_copy_changed")
+            require(copy_cipher(cipher, final, cipher_sha, cipher_identity, clock) == cipher_bytes,
+                    "cipher_copy_changed")
             stage = "receipt"
             receipt = {"schema_version": 1, "state": "ENCRYPTED_PRIVATE_PRODUCER_EVIDENCE_DELIVERED_NOT_QUALIFIED",
-                "operation_id": operation, "source_revision": row["source_revision"], "cipher_bytes": len(cipher_raw), "cipher_sha256": digest(cipher_raw),
+                "operation_id": operation, "source_revision": row["source_revision"], "cipher_bytes": cipher_bytes, "cipher_sha256": cipher_sha,
                 "recipient_sha256": digest(approved["recipient"].encode()), "age_binary_sha256": approved["age_binary_sha256"],
                 "plaintext_inventory_sha256": inventory_sha, "files_count": count, "compile_original_exit": 0,
                 "owned_compile_closed": True, "owned_seal_cli_closed": True, "sdk_qualified": False, "abi_qualified": False}

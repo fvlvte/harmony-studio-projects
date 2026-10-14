@@ -9,7 +9,7 @@ import re
 
 TARGET = "wasm32-unknown-unknown"
 HOST = "aarch64-unknown-linux-gnu"
-MAX_ARTIFACTS, MAX_ARTIFACT, MAX_TOTAL = 4096, 64 << 20, 512 << 20
+MAX_ARTIFACTS, MAX_ARTIFACT, MAX_TOTAL = 4096, 64 << 20, 2 << 30
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 
 
