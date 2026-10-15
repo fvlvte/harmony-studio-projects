@@ -24,12 +24,13 @@ SPEC.loader.exec_module(generator)
 IMAGE = "sha256:" + "a" * 64
 MANIFEST = "sha256:" + "b" * 64
 CID = "c" * 64
+BASE_LABELS = {"org.opencontainers.image.source": "https://github.com/rust-lang/docker-rust"}
 
 
 def image():
     return {"Id": IMAGE, "Architecture": "arm64", "Os": "linux", "Config": {
         "User": "65532:65532", "Entrypoint": ["rustfmt"], "Cmd": [], "WorkingDir": "",
-        "Labels": None, "Env": [k + "=" + v for k, v in generator.ENV.items()],
+        "Labels": dict(BASE_LABELS), "Env": [k + "=" + v for k, v in generator.ENV.items()],
         "Volumes": None, "ExposedPorts": None, "OnBuild": None, "Healthcheck": None},
         "RepoDigests": [generator.REGISTRY + "@" + MANIFEST]}
 
@@ -43,7 +44,7 @@ def tool_output():
 
 def container(row):
     return {"Id": CID, "Name": "/" + row["name"], "Image": IMAGE, "Mounts": [], "Config": {
-        "Labels": {"online.harmony.operation": row["operation"]}, "User": "65532:65532",
+        "Labels": {**BASE_LABELS, "online.harmony.operation": row["operation"]}, "User": "65532:65532",
         "Entrypoint": ["/usr/bin/env"], "WorkingDir": "/tmp", "Volumes": None,
         "Env": [k + "=" + v for k, v in generator.ENV.items()],
         "Cmd": ["-i", *(k + "=" + v for k, v in generator.GUEST_ENV.items()), "/bin/sh", "-c", generator.GUEST]},
@@ -189,6 +190,23 @@ class GeneratorTest(unittest.TestCase):
             self.assertEqual(self.invoke("probe"), 1)
         self.assertEqual(json.loads(self.output.getvalue())["code"], "probe_failed")
         self.assertNotIn("MODELED_PRIVATE_PATH_OR_TOKEN", self.output.getvalue())
+
+    def test_official_base_labels_are_inherited_and_exact_for_image_and_container(self):
+        self.assertEqual(generator.BASE_LABELS, BASE_LABELS)
+        self.assertEqual(generator.image_identity(image()), IMAGE)
+        row, _ = generator.container_arguments(IMAGE, "modeled-operation")
+        row["cid"] = CID
+        generator.container_identity(container(row), row)
+        for labels in ({}, {"org.opencontainers.image.source": "https://github.com/untrusted/changed"},
+                       {**BASE_LABELS, "unexpected": "MODELED_PRIVATE"}):
+            with self.subTest(labels=labels):
+                value = image(); value["Config"]["Labels"] = labels
+                with self.assertRaisesRegex(ValueError, "image_contract"):
+                    generator.image_identity(value)
+                value = container(row)
+                value["Config"]["Labels"] = {**labels, "online.harmony.operation": row["operation"]}
+                with self.assertRaisesRegex(ValueError, "container_identity"):
+                    generator.container_identity(value, row)
 
     def test_image_rejects_secret_environment_root_extra_labels_and_amd64(self):
         self.assertEqual(generator.image_identity(image()), IMAGE)

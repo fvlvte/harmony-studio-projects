@@ -30,6 +30,7 @@ CONTEXT_SHA = "8a6070eb50996d7fce08bfdff6ce5fe3ff218250386551c713996c4102ade601"
 ENV = {"PATH": "/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
        "RUSTUP_HOME": "/usr/local/rustup", "CARGO_HOME": "/usr/local/cargo",
        "RUST_VERSION": "1.99.0", "RUSTUP_AUTO_INSTALL": "0"}
+BASE_LABELS = {"org.opencontainers.image.source": "https://github.com/rust-lang/docker-rust"}
 GUEST_ENV = {**ENV, "CARGO_HOME": "/tmp/cargo", "HOME": "/tmp/home", "LANG": "C.UTF-8"}
 STOP = None
 PROBE_CODES = frozenset({
@@ -129,7 +130,7 @@ def image_identity(value):
     config = value["Config"]
     require(config.get("User") == "65532:65532" and config.get("Entrypoint") == ["rustfmt"]
             and config.get("Cmd") in (None, []) and config.get("WorkingDir") in (None, "")
-            and config.get("Labels") in (None, {}) and environment(config.get("Env")) == ENV
+            and config.get("Labels") == BASE_LABELS and environment(config.get("Env")) == ENV
             and not config.get("Volumes") and not config.get("ExposedPorts") and not config.get("OnBuild")
             and not config.get("Healthcheck"), "image_contract")
     return value["Id"]
@@ -190,7 +191,7 @@ def container_arguments(image, operation):
 def container_identity(value, row):
     config, host = value["Config"], value["HostConfig"]
     require(value.get("Id") == row["cid"] and value.get("Name") == "/" + row["name"] and value.get("Image") == row["image"]
-            and config.get("Labels") == {"online.harmony.operation": row["operation"]}
+            and config.get("Labels") == {**BASE_LABELS, "online.harmony.operation": row["operation"]}
             and config.get("User") == "65532:65532" and config.get("Entrypoint") == ["/usr/bin/env"]
             and config.get("Cmd") == ["-i", *(k + "=" + v for k, v in GUEST_ENV.items()), "/bin/sh", "-c", GUEST]
             and environment(config.get("Env")) == ENV and config.get("WorkingDir") == "/tmp" and not config.get("Volumes"),
