@@ -32,6 +32,15 @@ ENV = {"PATH": "/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/u
        "RUST_VERSION": "1.99.0", "RUSTUP_AUTO_INSTALL": "0"}
 GUEST_ENV = {**ENV, "CARGO_HOME": "/tmp/cargo", "HOME": "/tmp/home", "LANG": "C.UTF-8"}
 STOP = None
+PROBE_CODES = frozenset({
+    "input_identity", "input_bound", "input_drift", "owner_source_drift", "public_context_inventory",
+    "public_context_drift", "image_environment", "image_identity", "image_contract", "probe_output_bound",
+    "probe_output_shape", "probe_toolchain_version", "probe_tool_versions", "container_identity",
+    "container_sandbox", "interrupted", "probe_deadline", "private_evidence_root", "image_inspect",
+    "owner_receipt", "container_id", "container_exit", "image_tag_drift", "probe_source_drift",
+    "source_revision", "owned_closure", "cleanup_unknown", "probe_failed", "public_destination",
+    "receipt_or_deadline_unknown",
+})
 
 
 class Refused(ValueError):
@@ -119,7 +128,7 @@ def image_identity(value):
             and value.get("Architecture") == "arm64" and value.get("Os") == "linux", "image_identity")
     config = value["Config"]
     require(config.get("User") == "65532:65532" and config.get("Entrypoint") == ["rustfmt"]
-            and config.get("Cmd") == ["bash"] and config.get("WorkingDir") in (None, "")
+            and config.get("Cmd") in (None, []) and config.get("WorkingDir") in (None, "")
             and config.get("Labels") in (None, {}) and environment(config.get("Env")) == ENV
             and not config.get("Volumes") and not config.get("ExposedPorts") and not config.get("OnBuild")
             and not config.get("Healthcheck"), "image_contract")
@@ -215,6 +224,7 @@ def probe_main():
         if verify is not None and verify.STOP is None: verify.STOP = signum
     def failure(reason):
         nonlocal primary, result
+        reason = reason if type(reason) is str and reason in PROBE_CODES else "probe_failed"
         primary = primary or reason
         result = {"schema_version": 1, "operation_id": operation, "state": "failed", "code": primary,
                   "scope": "public_generator_identity_and_cleanup_only", "sdk_qualified": False}
@@ -276,7 +286,8 @@ def probe_main():
             verify = verify or owner_module()
             verify.save(public / "receipt.json", result)
             if result["state"] == "passed": clock()
-            print(canonical({"schema_version": 1, "state": result["state"], "scope": result["scope"]}).decode(), end="", flush=True)
+            print(canonical({"schema_version": 1, "state": result["state"], "scope": result["scope"],
+                             **({"code": result["code"]} if result["state"] == "failed" else {})}).decode(), end="", flush=True)
             if result["state"] == "passed": clock()
             code = 0 if result["state"] == "passed" else 1
         except Exception:

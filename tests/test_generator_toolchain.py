@@ -28,7 +28,7 @@ CID = "c" * 64
 
 def image():
     return {"Id": IMAGE, "Architecture": "arm64", "Os": "linux", "Config": {
-        "User": "65532:65532", "Entrypoint": ["rustfmt"], "Cmd": ["bash"], "WorkingDir": "",
+        "User": "65532:65532", "Entrypoint": ["rustfmt"], "Cmd": [], "WorkingDir": "",
         "Labels": None, "Env": [k + "=" + v for k, v in generator.ENV.items()],
         "Volumes": None, "ExposedPorts": None, "OnBuild": None, "Healthcheck": None},
         "RepoDigests": [generator.REGISTRY + "@" + MANIFEST]}
@@ -167,6 +167,28 @@ class GeneratorTest(unittest.TestCase):
         self.assertNotIn("wasm32", generator.GUEST)
         for old, new in [(b"1.99.0", b"1.98.1"), (b"aarch64", b"x86_64"), (b"d" * 64, b"nohash")]:
             with self.subTest(old=old), self.assertRaises(ValueError): generator.tools_output(tool_output().replace(old, new))
+
+    def test_entrypoint_resets_inherited_cmd_and_nonempty_commands_are_refused(self):
+        for command in (None, []):
+            value = image(); value["Config"]["Cmd"] = command
+            self.assertEqual(generator.image_identity(value), IMAGE)
+        for command in (["bash"], ["rustfmt"], "", False):
+            value = image(); value["Config"]["Cmd"] = command
+            with self.subTest(command=command), self.assertRaisesRegex(ValueError, "image_contract"):
+                generator.image_identity(value)
+
+    def test_probe_stdout_reports_only_fixed_failure_code(self):
+        with patch.object(generator, "image_identity", side_effect=generator.Refused("image_contract")):
+            self.assertEqual(self.invoke("probe"), 1)
+        value = json.loads(self.output.getvalue())
+        self.assertEqual(value["code"], "image_contract")
+        self.assertEqual(set(value), {"schema_version", "state", "scope", "code"})
+        shutil.rmtree(self.root / ".generator-public")
+        self.output = io.StringIO()
+        with patch.object(generator, "image_identity", side_effect=generator.Refused("MODELED_PRIVATE_PATH_OR_TOKEN")):
+            self.assertEqual(self.invoke("probe"), 1)
+        self.assertEqual(json.loads(self.output.getvalue())["code"], "probe_failed")
+        self.assertNotIn("MODELED_PRIVATE_PATH_OR_TOKEN", self.output.getvalue())
 
     def test_image_rejects_secret_environment_root_extra_labels_and_amd64(self):
         self.assertEqual(generator.image_identity(image()), IMAGE)
